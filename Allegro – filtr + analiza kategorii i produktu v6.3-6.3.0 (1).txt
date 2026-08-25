@@ -1,0 +1,3084 @@
+// ==UserScript==
+// @name         Allegro – filtr + analiza kategorii i produktu v6.3
+// @namespace    natan-allegro
+// @version      6.3.0
+// @description  Ręczny filtr ofert, analiza kategorii i analiza produktu bez ciągłych pętli.
+// @match        https://allegro.pl/*
+// @match        https://www.allegro.pl/*
+// @run-at       document-idle
+// @grant        none
+// ==/UserScript==
+
+(() => {
+    'use strict';
+
+    const PREFIX = 'natan-allegro-v63-';
+
+    const DEFAULTS = {
+        activeTab: 'category',
+        collapsed: false,
+
+        categoryMinSales: 50,
+        maxCategoryOffers: 10000,
+        minStrongOffers: 3,
+
+        filterMinSales: 0,
+        hideSponsored: false,
+        hideUnknown: false
+    };
+
+    const state = {
+        activeTab: load(
+            'activeTab',
+            DEFAULTS.activeTab
+        ),
+
+        collapsed: loadBool(
+            'collapsed',
+            DEFAULTS.collapsed
+        ),
+
+        categoryMinSales: loadNum(
+            'categoryMinSales',
+            DEFAULTS.categoryMinSales,
+            1,
+            9999
+        ),
+
+        maxCategoryOffers: loadNum(
+            'maxCategoryOffers',
+            DEFAULTS.maxCategoryOffers,
+            100,
+            999999
+        ),
+
+        minStrongOffers: loadNum(
+            'minStrongOffers',
+            DEFAULTS.minStrongOffers,
+            1,
+            100
+        ),
+
+        filterMinSales: loadNum(
+            'filterMinSales',
+            DEFAULTS.filterMinSales,
+            0,
+            999
+        ),
+
+        hideSponsored: loadBool(
+            'hideSponsored',
+            DEFAULTS.hideSponsored
+        ),
+
+        hideUnknown: loadBool(
+            'hideUnknown',
+            DEFAULTS.hideUnknown
+        )
+    };
+
+    const CLS = {
+        hiddenSales:
+            'natan-hidden-sales-v63',
+
+        hiddenSponsored:
+            'natan-hidden-sponsored-v63',
+
+        hiddenUnknown:
+            'natan-hidden-unknown-v63'
+    };
+
+    let lastCategory = null;
+    let lastProduct = null;
+    let lastFilter = null;
+
+    function key(name) {
+        return PREFIX + name;
+    }
+
+    function clamp(
+        value,
+        minimum,
+        maximum
+    ) {
+        return Math.min(
+            maximum,
+            Math.max(
+                minimum,
+                value
+            )
+        );
+    }
+
+    function load(
+        name,
+        fallback
+    ) {
+        return (
+            localStorage.getItem(
+                key(name)
+            ) ??
+            fallback
+        );
+    }
+
+    function loadBool(
+        name,
+        fallback
+    ) {
+        const value =
+            localStorage.getItem(
+                key(name)
+            );
+
+        return value === null
+            ? fallback
+            : value === 'true';
+    }
+
+    function loadNum(
+        name,
+        fallback,
+        minimum,
+        maximum
+    ) {
+        const value = Number(
+            localStorage.getItem(
+                key(name)
+            )
+        );
+
+        return Number.isFinite(value)
+            ? clamp(
+                Math.round(value),
+                minimum,
+                maximum
+            )
+            : fallback;
+    }
+
+    function save() {
+        Object.entries(state)
+            .forEach(
+                ([name, value]) => {
+                    localStorage.setItem(
+                        key(name),
+                        String(value)
+                    );
+                }
+            );
+    }
+
+    function reset() {
+        Object.keys(localStorage)
+            .filter(
+                item =>
+                    item.startsWith(
+                        PREFIX
+                    )
+            )
+            .forEach(
+                item =>
+                    localStorage.removeItem(
+                        item
+                    )
+            );
+
+        clearFilter();
+        location.reload();
+    }
+
+    function norm(value) {
+        return String(
+            value ?? ''
+        )
+            .replace(
+                /\u00a0/g,
+                ' '
+            )
+            .replace(
+                /\s+/g,
+                ' '
+            )
+            .trim()
+            .toLowerCase();
+    }
+
+    function esc(value) {
+        return String(
+            value ?? ''
+        )
+            .replaceAll(
+                '&',
+                '&amp;'
+            )
+            .replaceAll(
+                '<',
+                '&lt;'
+            )
+            .replaceAll(
+                '>',
+                '&gt;'
+            )
+            .replaceAll(
+                '"',
+                '&quot;'
+            )
+            .replaceAll(
+                "'",
+                '&#039;'
+            );
+    }
+
+    function fmt(
+        value,
+        digits = 0
+    ) {
+        return Number.isFinite(value)
+            ? value.toLocaleString(
+                'pl-PL',
+                {
+                    minimumFractionDigits:
+                        digits,
+
+                    maximumFractionDigits:
+                        digits
+                }
+            )
+            : '—';
+    }
+
+    function avg(values) {
+        if (!values.length) {
+            return 0;
+        }
+
+        return Math.round(
+            values.reduce(
+                (
+                    sum,
+                    value
+                ) =>
+                    sum + value,
+                0
+            ) /
+            values.length
+        );
+    }
+
+    function parseCompact(raw) {
+        const text = String(
+            raw ?? ''
+        )
+            .replace(
+                /\u00a0/g,
+                ''
+            )
+            .replace(
+                /\s+/g,
+                ''
+            )
+            .replace(
+                ',',
+                '.'
+            )
+            .toLowerCase();
+
+        let match = text.match(
+            /^(\d+(?:\.\d+)?)tys\.?\+?$/
+        );
+
+        if (match) {
+            return Math.round(
+                Number(
+                    match[1]
+                ) * 1000
+            );
+        }
+
+        match = text.match(
+            /^(\d+(?:\.\d+)?)mln\.?\+?$/
+        );
+
+        if (match) {
+            return Math.round(
+                Number(
+                    match[1]
+                ) * 1000000
+            );
+        }
+
+        const digits =
+            text.match(/\d+/g);
+
+        return digits
+            ? Number(
+                digits.join('')
+            )
+            : null;
+    }
+
+    function parseSalesText(text) {
+    const normalized = norm(text);
+
+    /*
+     * Obsługiwane:
+     * 1,2 tys. osób kupiło
+     * 1,2 tys. osoby kupiły
+     * 1,2 tys. osoba kupiła
+     */
+    let match = normalized.match(
+        /(\d+(?:[.,]\d+)?)\s*tys\.?\s*(?:osób|osoby|osoba)\s+kupi\w*/
+    );
+
+    if (match) {
+        const value = Number(
+            match[1].replace(',', '.')
+        );
+
+        return Number.isFinite(value)
+            ? Math.round(value * 1000)
+            : null;
+    }
+
+    /*
+     * Obsługiwane:
+     * 340 osób kupiło
+     * 192 osoby kupiły
+     * 1 osoba kupiła
+     */
+    match = normalized.match(
+        /(\d[\d\s]*)\s*(?:osób|osoby|osoba)\s+kupi\w*/
+    );
+
+    if (!match) {
+        return null;
+    }
+
+    const value = Number(
+        match[1].replace(/\s/g, '')
+    );
+
+    return Number.isFinite(value)
+        ? value
+        : null;
+}
+
+    function getOfferArticles() {
+        return [
+            ...document
+                .querySelectorAll(
+                    'article'
+                )
+        ].filter(
+            article => {
+                const hasTitle =
+                    Boolean(
+                        article.querySelector(
+                            'h2 a'
+                        )
+                    );
+
+                const hasOffer =
+                    Boolean(
+                        article.querySelector(
+                            [
+                                'a[href*="/oferta/"]',
+                                'a[href*="/events/clicks"]',
+                                '[data-role-type="add-to-cart-button"]'
+                            ].join(',')
+                        )
+                    );
+
+                return (
+                    hasTitle &&
+                    hasOffer
+                );
+            }
+        );
+    }
+
+    function visualContainer(
+        article
+    ) {
+        const listItem =
+            article.closest('li');
+
+        if (
+            listItem &&
+            listItem
+                .querySelectorAll(
+                    ':scope article'
+                )
+                .length === 1
+        ) {
+            return listItem;
+        }
+
+        return article;
+    }
+
+    function offerSales(article) {
+        const ariaElements =
+            article.querySelectorAll(
+                '[aria-label]'
+            );
+
+        for (
+            const element
+            of ariaElements
+        ) {
+            const label =
+                element.getAttribute(
+                    'aria-label'
+                ) || '';
+
+            if (
+                norm(label)
+                    .includes('kupi')
+            ) {
+                const sales =
+                    parseSalesText(
+                        label
+                    );
+
+                if (sales !== null) {
+                    return sales;
+                }
+            }
+        }
+
+        return parseSalesText(
+            article.textContent || ''
+        );
+    }
+
+    function offerSponsored(article) {
+        const labels =
+            article.querySelectorAll(
+                'p, span, div'
+            );
+
+        for (
+            const element
+            of labels
+        ) {
+            const text =
+                norm(
+                    element.textContent
+                );
+
+            if (
+                text ===
+                    'sponsorowane' ||
+                text ===
+                    'promowane' ||
+                text ===
+                    'oferta sponsorowana'
+            ) {
+                return true;
+            }
+        }
+
+        return Boolean(
+            article.querySelector(
+                [
+                    'a[href*="/events/clicks"][href*="bi_s%3Dads"]',
+                    'a[href*="/events/clicks"][href*="bi_s=ads"]'
+                ].join(',')
+            )
+        );
+    }
+
+    function offerRecords() {
+        return getOfferArticles()
+            .map(
+                article => {
+                    const sales =
+                        offerSales(
+                            article
+                        );
+
+                    const sponsored =
+                        offerSponsored(
+                            article
+                        );
+
+                    article.dataset
+                        .natanSales =
+                        sales === null
+                            ? 'unknown'
+                            : String(sales);
+
+                    article.dataset
+                        .natanSponsored =
+                        String(
+                            sponsored
+                        );
+
+                    return {
+                        article,
+
+                        container:
+                            visualContainer(
+                                article
+                            ),
+
+                        sales,
+                        sponsored
+                    };
+                }
+            );
+    }
+
+    function clearFilter() {
+        document
+            .querySelectorAll(
+                [
+                    `.${CLS.hiddenSales}`,
+                    `.${CLS.hiddenSponsored}`,
+                    `.${CLS.hiddenUnknown}`
+                ].join(',')
+            )
+            .forEach(
+                element => {
+                    element.classList
+                        .remove(
+                            CLS.hiddenSales,
+                            CLS.hiddenSponsored,
+                            CLS.hiddenUnknown
+                        );
+                }
+            );
+    }
+
+    function applyFilter() {
+        const startedAt =
+            performance.now();
+
+        clearFilter();
+
+        const records =
+            offerRecords();
+
+        let visible = 0;
+        let low = 0;
+        let sponsored = 0;
+        let unknown = 0;
+
+        for (
+            const record
+            of records
+        ) {
+            if (
+                record.sponsored &&
+                state.hideSponsored
+            ) {
+                record.container
+                    .classList.add(
+                        CLS.hiddenSponsored
+                    );
+
+                sponsored++;
+                continue;
+            }
+
+            if (
+                record.sales === null
+            ) {
+                if (
+                    state.hideUnknown
+                ) {
+                    record.container
+                        .classList.add(
+                            CLS.hiddenUnknown
+                        );
+
+                    unknown++;
+                } else {
+                    visible++;
+                }
+
+                continue;
+            }
+
+            if (
+                record.sales <
+                state.filterMinSales
+            ) {
+                record.container
+                    .classList.add(
+                        CLS.hiddenSales
+                    );
+
+                low++;
+                continue;
+            }
+
+            visible++;
+        }
+
+        lastFilter = {
+            total:
+                records.length,
+
+            visible,
+            low,
+            sponsored,
+            unknown,
+
+            ms:
+                Math.round(
+                    performance.now() -
+                    startedAt
+                )
+        };
+
+        renderFilter();
+    }
+
+    function removeFilter() {
+        clearFilter();
+
+        const amount =
+            getOfferArticles()
+                .length;
+
+        lastFilter = {
+            total:
+                amount,
+
+            visible:
+                amount,
+
+            low:
+                0,
+
+            sponsored:
+                0,
+
+            unknown:
+                0,
+
+            ms:
+                0
+        };
+
+        renderFilter();
+    }
+
+    function categoryName() {
+        return (
+            document
+                .querySelector('h1')
+                ?.textContent || ''
+        ).trim() ||
+        'Nie wykryto';
+    }
+
+    function categoryOfferCount() {
+        const heading =
+            document.querySelector(
+                'h1'
+            );
+
+        const roots =
+            heading?.parentElement
+                ? [
+                    heading.parentElement,
+                    document.body
+                ]
+                : [
+                    document.body
+                ];
+
+        for (
+            const root
+            of roots
+        ) {
+            const candidates =
+                root.querySelectorAll(
+                    'div, span, p'
+                );
+
+            for (
+                const element
+                of candidates
+            ) {
+                const match =
+                    norm(
+                        element.textContent
+                    ).match(
+                        /^([\d\s.,]+(?:tys\.?|mln\.?)?\+?)\s*ofert(?:a|y)?$/
+                    );
+
+                if (match) {
+                    const amount =
+                        parseCompact(
+                            match[1]
+                        );
+
+                    if (
+                        amount !== null
+                    ) {
+                        return amount;
+                    }
+                }
+            }
+        }
+
+        return null;
+    }
+
+    function analyzeCategory() {
+        const startedAt =
+            performance.now();
+
+        const records =
+            offerRecords();
+
+        const allSales = [];
+        const organicSales = [];
+        const sponsoredSales = [];
+
+        let unknown = 0;
+        let sponsoredCount = 0;
+
+        for (
+            const record
+            of records
+        ) {
+            if (
+                record.sponsored
+            ) {
+                sponsoredCount++;
+            }
+
+            if (
+                record.sales === null
+            ) {
+                unknown++;
+                continue;
+            }
+
+            allSales.push(
+                record.sales
+            );
+
+            if (
+                record.sponsored
+            ) {
+                sponsoredSales.push(
+                    record.sales
+                );
+            } else {
+                organicSales.push(
+                    record.sales
+                );
+            }
+        }
+
+        allSales.sort(
+            (
+                first,
+                second
+            ) =>
+                second - first
+        );
+
+        organicSales.sort(
+            (
+                first,
+                second
+            ) =>
+                second - first
+        );
+
+        sponsoredSales.sort(
+            (
+                first,
+                second
+            ) =>
+                second - first
+        );
+
+        const strong =
+            allSales.filter(
+                value =>
+                    value >=
+                    state
+                        .categoryMinSales
+            );
+
+        const result = {
+            name:
+                categoryName(),
+
+            count:
+                categoryOfferCount(),
+
+            detected:
+                records.length,
+
+            withSales:
+                allSales.length,
+
+            organic:
+                organicSales.length,
+
+            promoted:
+                sponsoredSales.length,
+
+            sponsoredCount,
+
+            unknown,
+
+            strong:
+                strong.length,
+
+            strongOrganic:
+                organicSales.filter(
+                    value =>
+                        value >=
+                        state
+                            .categoryMinSales
+                ).length,
+
+            strongPromoted:
+                sponsoredSales.filter(
+                    value =>
+                        value >=
+                        state
+                            .categoryMinSales
+                ).length,
+
+            max:
+                allSales[0] || 0,
+
+            top5:
+                avg(
+                    allSales.slice(
+                        0,
+                        5
+                    )
+                ),
+
+            ms:
+                Math.round(
+                    performance.now() -
+                    startedAt
+                )
+        };
+
+        result.score =
+            categoryScore(
+                result
+            );
+
+        result.verdict =
+            categoryVerdict(
+                result.score
+            );
+
+        return result;
+    }
+
+    function categoryScore(
+        analysis
+    ) {
+        let score = 0;
+
+        if (
+            analysis.count !== null
+        ) {
+            if (
+                analysis.count <=
+                3000
+            ) {
+                score += 30;
+            } else if (
+                analysis.count <=
+                6000
+            ) {
+                score += 26;
+            } else if (
+                analysis.count <=
+                state
+                    .maxCategoryOffers
+            ) {
+                score += 20;
+            } else if (
+                analysis.count <=
+                state
+                    .maxCategoryOffers *
+                    1.5
+            ) {
+                score += 10;
+            }
+        }
+
+        if (
+            analysis.strong >= 10
+        ) {
+            score += 40;
+        } else if (
+            analysis.strong >= 7
+        ) {
+            score += 37;
+        } else if (
+            analysis.strong >= 5
+        ) {
+            score += 34;
+        } else if (
+            analysis.strong >= 3
+        ) {
+            score += 28;
+        } else if (
+            analysis.strong === 2
+        ) {
+            score += 18;
+        } else if (
+            analysis.strong === 1
+        ) {
+            score += 9;
+        }
+
+        if (
+            analysis.strong >=
+            state.minStrongOffers
+        ) {
+            score += 15;
+        }
+
+        if (
+            analysis.top5 >=
+            state.categoryMinSales *
+            3
+        ) {
+            score += 10;
+        } else if (
+            analysis.top5 >=
+            state.categoryMinSales *
+            2
+        ) {
+            score += 8;
+        } else if (
+            analysis.top5 >=
+            state.categoryMinSales
+        ) {
+            score += 4;
+        }
+
+        if (
+            analysis.max >=
+            state.categoryMinSales *
+            5
+        ) {
+            score += 5;
+        } else if (
+            analysis.max >=
+            state.categoryMinSales *
+            3
+        ) {
+            score += 4;
+        } else if (
+            analysis.max >=
+            state.categoryMinSales *
+            2
+        ) {
+            score += 2;
+        }
+
+        return clamp(
+            score,
+            0,
+            100
+        );
+    }
+
+    function categoryVerdict(
+        score
+    ) {
+        if (
+            score >= 85
+        ) {
+            return {
+                label:
+                    'BANGER',
+
+                cls:
+                    'banger',
+
+                desc:
+                    'Bardzo mocna kategoria.'
+            };
+        }
+
+        if (
+            score >= 65
+        ) {
+            return {
+                label:
+                    'DOBRA',
+
+                cls:
+                    'good',
+
+                desc:
+                    'Kategoria wygląda dobrze.'
+            };
+        }
+
+        if (
+            score >= 45
+        ) {
+            return {
+                label:
+                    'DO SPRAWDZENIA',
+
+                cls:
+                    'medium',
+
+                desc:
+                    'Kategoria wymaga dalszej weryfikacji.'
+            };
+        }
+
+        return {
+            label:
+                'SŁABA',
+
+            cls:
+                'bad',
+
+            desc:
+                'Za mało popytu albo za duża konkurencja.'
+        };
+    }
+
+    function runCategory() {
+        const button =
+            document.getElementById(
+                'natan-category-run'
+            );
+
+        button.disabled = true;
+        button.textContent =
+            'Analizowanie...';
+
+        requestAnimationFrame(
+            () => {
+                lastCategory =
+                    analyzeCategory();
+
+                renderCategory();
+                renderAdvanced();
+
+                button.disabled =
+                    false;
+
+                button.textContent =
+                    'Analizuj kategorię';
+            }
+        );
+    }
+
+    function productBrand() {
+        const element =
+            document.querySelector(
+                [
+                    '[data-analytics-view-label="brandLink"]',
+                    '[data-analytics-click-label="parameterLink"][data-analytics-click-value="Marka"]'
+                ].join(',')
+            );
+
+        if (
+            element?.dataset
+                .analyticsViewValue
+        ) {
+            return element
+                .dataset
+                .analyticsViewValue
+                .trim();
+        }
+
+        const candidate =
+            [
+                ...document
+                    .querySelectorAll(
+                        'div, p, span, td'
+                    )
+            ].find(
+                item =>
+                    /^marka:\s*/i.test(
+                        (
+                            item.textContent ||
+                            ''
+                        ).trim()
+                    )
+            );
+
+        const text =
+            candidate
+                ?.textContent ||
+            '';
+
+        return text
+            .replace(
+                /^marka:\s*/i,
+                ''
+            )
+            .trim() ||
+            'Nie wykryto';
+    }
+
+    function productTitle() {
+        return (
+            document
+                .querySelector('h1')
+                ?.textContent || ''
+        ).trim() ||
+        'Nie wykryto';
+    }
+
+    function productRating() {
+        const element =
+            document.querySelector(
+                '[data-analytics-view-label="productRating"]'
+            );
+
+        const value = Number(
+            element?.getAttribute(
+                'data-analytics-view-custom-rating-value'
+            )
+        );
+
+        if (
+            Number.isFinite(value)
+        ) {
+            return value;
+        }
+
+        const aria =
+            document
+                .querySelector(
+                    '[aria-label^="ocena:"]'
+                )
+                ?.getAttribute(
+                    'aria-label'
+                ) || '';
+
+        const match =
+            aria.match(
+                /ocena:\s*([\d,.]+)/i
+            );
+
+        return match
+            ? Number(
+                match[1]
+                    .replace(
+                        ',',
+                        '.'
+                    )
+            )
+            : null;
+    }
+
+    function productReviewCounts() {
+        const element =
+            document.querySelector(
+                '[data-analytics-view-label="productRating"]'
+            );
+
+        const ratingCount =
+            Number(
+                element?.getAttribute(
+                    'data-analytics-view-custom-rating-count'
+                )
+            );
+
+        const text =
+            element?.textContent ||
+            document.body.innerText;
+
+        const ratings =
+            Number.isFinite(
+                ratingCount
+            )
+                ? ratingCount
+                : Number(
+                    (
+                        text.match(
+                            /(\d[\d\s]*)\s+ocen/i
+                        )?.[1] ||
+                        ''
+                    ).replace(
+                        /\s/g,
+                        ''
+                    )
+                ) || 0;
+
+        const reviews =
+            Number(
+                (
+                    text.match(
+                        /(\d[\d\s]*)\s+recenzj/i
+                    )?.[1] ||
+                    ''
+                ).replace(
+                    /\s/g,
+                    ''
+                )
+            ) || 0;
+
+        return {
+            ratings,
+            reviews
+        };
+    }
+
+function productSales() {
+    const ratingLink = document.querySelector(
+        '[data-analytics-view-label="productRating"]'
+    );
+
+    if (ratingLink) {
+        let current = ratingLink.parentElement;
+
+        for (let level = 0; level < 4 && current; level++) {
+            const text = current.textContent || '';
+
+            if (
+                /(?:osób|osoby|osoba)\s+kupi\w*\s+ostatnio/i.test(text)
+            ) {
+                const sales = parseSalesText(text);
+
+                if (sales !== null) {
+                    return sales;
+                }
+            }
+
+            current = current.parentElement;
+        }
+    }
+
+    const candidates = [
+        ...document.querySelectorAll('div, span, p')
+    ];
+
+    for (const element of candidates) {
+        const text = norm(
+            element.textContent
+        );
+
+        if (
+            !text.includes('ostatnio') ||
+            !/(?:osób|osoby|osoba)\s+kupi\w*/.test(text)
+        ) {
+            continue;
+        }
+
+        const sales = parseSalesText(text);
+
+        if (sales !== null) {
+            return sales;
+        }
+    }
+
+    return null;
+}
+
+    function currentOfferSales() {
+        const text =
+            document.body
+                .innerText || '';
+
+        const match =
+            text.match(
+                /(\d[\d\s]*)\s+(?:osób|osoby|osoba)\s+kupiło\s+tę\s+ofertę/i
+            );
+
+        return match
+            ? Number(
+                match[1]
+                    .replace(
+                        /\s/g,
+                        ''
+                    )
+            )
+            : null;
+    }
+
+    function catalogueOffers() {
+    const link = document.querySelector(
+        'a.other-offers-link-all[href="#inne-oferty-produktu"]'
+    );
+
+    if (!link) {
+        return null;
+    }
+
+    const text = link.textContent || '';
+
+    const match = text.match(
+        /wszystkie\s+oferty\s*\((\d[\d\s]*)\)/i
+    );
+
+    if (!match) {
+        return null;
+    }
+
+    const value = Number(
+        match[1].replace(/\s/g, '')
+    );
+
+    return Number.isFinite(value)
+        ? value
+        : null;
+}
+
+    function officialShopInfo() {
+        let label = '';
+
+        const elements =
+            document.querySelectorAll(
+                'div, p, span'
+            );
+
+        for (
+            const element
+            of elements
+        ) {
+            const text =
+                (
+                    element
+                        .textContent ||
+                    ''
+                ).trim();
+
+            if (
+                /^od\s+oficjalny sklep/i
+                    .test(text)
+            ) {
+                label = text;
+                break;
+            }
+        }
+
+        const logo =
+            document.querySelector(
+                'img[alt*="logo oficjalnego sklepu" i]'
+            );
+
+        if (
+            !label &&
+            logo
+        ) {
+            label =
+                logo.getAttribute(
+                    'alt'
+                ) || '';
+        }
+
+        const official =
+            Boolean(
+                label ||
+                logo
+            );
+
+        const shop =
+            label
+                .replace(
+                    /^od\s+oficjalny sklep\s*/i,
+                    ''
+                )
+                .replace(
+                    /^logo oficjalnego sklepu\s*/i,
+                    ''
+                )
+                .trim();
+
+        return {
+            official,
+
+            shop:
+                shop ||
+                'Nie wykryto'
+        };
+    }
+
+    function sameBrandShop(
+        brand,
+        shop
+    ) {
+        const first =
+            norm(brand)
+                .replace(
+                    /[^a-z0-9ąćęłńóśźż]/g,
+                    ''
+                );
+
+        const second =
+            norm(shop)
+                .replace(
+                    /[^a-z0-9ąćęłńóśźż]/g,
+                    ''
+                );
+
+        return Boolean(
+            first &&
+            second &&
+            (
+                first === second ||
+                first.includes(
+                    second
+                ) ||
+                second.includes(
+                    first
+                )
+            )
+        );
+    }
+
+    function productPrice() {
+        const candidates = [
+            document
+                .querySelector(
+                    '[data-analytics-interaction-custom-price]'
+                )
+                ?.getAttribute(
+                    'data-analytics-interaction-custom-price'
+                ),
+
+            document
+                .querySelector(
+                    '[data-analytics-view-label="price"]'
+                )
+                ?.textContent
+        ];
+
+        for (
+            const raw
+            of candidates
+        ) {
+            if (!raw) {
+                continue;
+            }
+
+            const direct =
+                Number(
+                    String(raw)
+                        .replace(
+                            ',',
+                            '.'
+                        )
+                );
+
+            if (
+                Number.isFinite(
+                    direct
+                ) &&
+                direct > 0
+            ) {
+                return direct;
+            }
+
+            const match =
+                String(raw)
+                    .match(
+                        /(\d[\d\s]*)[,.]([0-9]{2})\s*zł/i
+                    );
+
+            if (match) {
+                return Number(
+                    match[1]
+                        .replace(
+                            /\s/g,
+                            ''
+                        ) +
+                    '.' +
+                    match[2]
+                );
+            }
+        }
+
+        const body =
+            document.body
+                .innerText || '';
+
+        const matches =
+            [
+                ...body.matchAll(
+                    /(\d[\d\s]*)[,.]([0-9]{2})\s*zł/g
+                )
+            ]
+                .map(
+                    match =>
+                        Number(
+                            match[1]
+                                .replace(
+                                    /\s/g,
+                                    ''
+                                ) +
+                            '.' +
+                            match[2]
+                        )
+                )
+                .filter(
+                    value =>
+                        value > 1
+                );
+
+        return matches.length
+            ? matches[0]
+            : null;
+    }
+
+    function roundUp89(price) {
+        let candidate =
+            Math.floor(
+                price / 10
+            ) *
+            10 +
+            9.89;
+
+        if (
+            candidate < price
+        ) {
+            candidate += 10;
+        }
+
+        return Math.round(
+            candidate * 100
+        ) / 100;
+    }
+
+    function pricing(
+        purchase
+    ) {
+        if (
+            !Number.isFinite(
+                purchase
+            )
+        ) {
+            return null;
+        }
+
+        const commission =
+            0.12;
+
+        const tax =
+            0.19;
+
+        const targetNet =
+            100;
+
+        const profitBeforeTax =
+            targetNet /
+            (
+                1 - tax
+            );
+
+        const minimum =
+            (
+                purchase +
+                profitBeforeTax
+            ) /
+            (
+                1 - commission
+            );
+
+        const suggested =
+            roundUp89(
+                minimum
+            );
+
+        const commissionValue =
+            suggested *
+            commission;
+
+        const grossProfitBeforeTax =
+            suggested -
+            commissionValue -
+            purchase;
+
+        const incomeTax =
+            Math.max(
+                0,
+                grossProfitBeforeTax *
+                tax
+            );
+
+        const netProfit =
+            grossProfitBeforeTax -
+            incomeTax;
+
+        return {
+            purchase,
+            commission,
+            tax,
+            targetNet,
+            minimum,
+            suggested,
+            commissionValue,
+            profitBeforeTax:
+                grossProfitBeforeTax,
+            incomeTax,
+            netProfit
+        };
+    }
+
+    function productScore(
+        analysis
+    ) {
+        if (
+            analysis.sales === null ||
+            analysis.sales < 50
+        ) {
+            return 0;
+        }
+
+        if (
+            analysis.official &&
+            analysis.brandMatchesShop &&
+            (
+                analysis.offers ?? 0
+            ) < 8
+        ) {
+            return 0;
+        }
+
+        let score = 0;
+
+        if (
+            analysis.sales >= 300
+        ) {
+            score += 35;
+        } else if (
+            analysis.sales >= 200
+        ) {
+            score += 31;
+        } else if (
+            analysis.sales >= 100
+        ) {
+            score += 27;
+        } else {
+            score += 22;
+        }
+
+        if (
+            analysis.rating !== null
+        ) {
+            if (
+                analysis.rating >= 4.95
+            ) {
+                score += 15;
+            } else if (
+                analysis.rating >= 4.9
+            ) {
+                score += 13;
+            } else if (
+                analysis.rating >= 4.8
+            ) {
+                score += 10;
+            } else if (
+                analysis.rating >= 4.7
+            ) {
+                score += 6;
+            }
+        }
+
+        if (
+            analysis.ratings >= 500
+        ) {
+            score += 15;
+        } else if (
+            analysis.ratings >= 250
+        ) {
+            score += 13;
+        } else if (
+            analysis.ratings >= 100
+        ) {
+            score += 10;
+        } else if (
+            analysis.ratings >= 50
+        ) {
+            score += 7;
+        } else if (
+            analysis.ratings >= 20
+        ) {
+            score += 4;
+        }
+
+        if (
+            analysis.reviews >= 100
+        ) {
+            score += 10;
+        } else if (
+            analysis.reviews >= 50
+        ) {
+            score += 8;
+        } else if (
+            analysis.reviews >= 20
+        ) {
+            score += 6;
+        } else if (
+            analysis.reviews >= 10
+        ) {
+            score += 4;
+        }
+
+        if (
+            analysis.offers !== null
+        ) {
+            if (
+                analysis.offers >= 20 &&
+                analysis.offers <= 60
+            ) {
+                score += 15;
+            } else if (
+                analysis.offers >= 9 &&
+                analysis.offers < 20
+            ) {
+                score += 12;
+            } else if (
+                analysis.offers > 60 &&
+                analysis.offers <= 120
+            ) {
+                score += 10;
+            } else if (
+                analysis.offers >= 8
+            ) {
+                score += 7;
+            }
+        }
+
+
+        return clamp(
+            score,
+            0,
+            100
+        );
+    }
+
+    function productVerdict(
+        analysis
+    ) {
+        if (
+            analysis.sales === null
+        ) {
+            return {
+                label:
+                    'BRAK DANYCH',
+
+                cls:
+                    'medium',
+
+                desc:
+                    'Nie wykryto sprzedaży produktu.'
+            };
+        }
+
+        if (
+            analysis.sales < 50
+        ) {
+            return {
+                label:
+                    'ODRZUĆ',
+
+                cls:
+                    'bad',
+
+                desc:
+                    `Sprzedaż produktu wynosi ${analysis.sales}; wymagane minimum to 50.`
+            };
+        }
+
+        if (
+            analysis.official &&
+            analysis.brandMatchesShop &&
+            (
+                analysis.offers ?? 0
+            ) < 8
+        ) {
+            return {
+                label:
+                    'ODRZUĆ',
+
+                cls:
+                    'bad',
+
+                desc:
+                    'Oficjalny sklep tej samej marki i mniej niż 8 ofert w katalogu.'
+            };
+        }
+
+        if (
+            analysis.score >= 85
+        ) {
+            return {
+                label:
+                    'BANGER',
+
+                cls:
+                    'banger',
+
+                desc:
+                    'Bardzo mocny produkt.'
+            };
+        }
+
+        if (
+            analysis.score >= 65
+        ) {
+            return {
+                label:
+                    'DOBRY',
+
+                cls:
+                    'good',
+
+                desc:
+                    'Produkt wygląda dobrze.'
+            };
+        }
+
+        if (
+            analysis.score >= 45
+        ) {
+            return {
+                label:
+                    'Średni',
+
+                cls:
+                    'medium',
+
+                desc:
+                    'Prawdopodbnie mały popyt'
+            };
+        }
+
+        return {
+            label:
+                'ODRZUĆ',
+
+            cls:
+                'bad',
+
+            desc:
+                'Produkt nie uzyskał wystarczającej oceny.'
+        };
+    }
+
+    function analyzeProduct() {
+        const startedAt =
+            performance.now();
+
+        const brand =
+            productBrand();
+
+        const officialInfo =
+            officialShopInfo();
+
+        const counts =
+            productReviewCounts();
+
+        const result = {
+            title:
+                productTitle(),
+
+            brand,
+
+            official:
+                officialInfo.official,
+
+            shop:
+                officialInfo.shop,
+
+            brandMatchesShop:
+                sameBrandShop(
+                    brand,
+                    officialInfo.shop
+                ),
+
+            offers:
+                catalogueOffers(),
+
+            sales:
+                productSales(),
+
+            rating:
+                productRating(),
+
+            ratings:
+                counts.ratings,
+
+            reviews:
+                counts.reviews,
+
+            price:
+                productPrice(),
+
+            ms:
+                0
+        };
+
+        result.pricing =
+            pricing(
+                result.price
+            );
+
+        result.score =
+            productScore(
+                result
+            );
+
+        result.verdict =
+            productVerdict(
+                result
+            );
+
+        result.ms =
+            Math.round(
+                performance.now() -
+                startedAt
+            );
+
+        return result;
+    }
+
+    function runProduct() {
+        const button =
+            document.getElementById(
+                'natan-product-run'
+            );
+
+        button.disabled = true;
+        button.textContent =
+            'Analizowanie...';
+
+        requestAnimationFrame(
+            () => {
+                lastProduct =
+                    analyzeProduct();
+
+                renderProduct();
+
+                button.disabled =
+                    false;
+
+                button.textContent =
+                    'Analizuj produkt';
+            }
+        );
+    }
+
+    function addStyles() {
+        if (
+            document.getElementById(
+                'natan-v63-style'
+            )
+        ) {
+            return;
+        }
+
+        const style =
+            document.createElement(
+                'style'
+            );
+
+        style.id =
+            'natan-v63-style';
+
+        style.textContent = `
+            .${CLS.hiddenSales},
+            .${CLS.hiddenSponsored},
+            .${CLS.hiddenUnknown} {
+                display: none !important;
+            }
+
+            #natan-panel-v63 {
+                position: fixed;
+                right: 18px;
+                bottom: 18px;
+                z-index: 2147483647;
+
+                width: 350px;
+                max-height: calc(100vh - 36px);
+                overflow: auto;
+
+                padding: 13px;
+
+                color: #ffffff;
+                background: rgba(20,20,20,.97);
+
+                border: 1px solid rgba(255,255,255,.18);
+                border-radius: 11px;
+
+                box-shadow: 0 10px 35px rgba(0,0,0,.55);
+
+                font-family: Arial, sans-serif;
+                font-size: 13px;
+                line-height: 1.35;
+            }
+
+            #natan-panel-v63 * {
+                box-sizing: border-box;
+            }
+
+            #natan-panel-v63.collapsed {
+                width: auto;
+                min-width: 235px;
+            }
+
+            #natan-panel-v63.collapsed .body {
+                display: none;
+            }
+
+            .hdr {
+                display: flex;
+                align-items: center;
+                justify-content: space-between;
+
+                font-weight: 700;
+            }
+
+            .collapse {
+                width: 29px;
+                height: 27px;
+
+                border: 1px solid #555;
+                border-radius: 6px;
+
+                color: #ffffff;
+                background: #333333;
+
+                cursor: pointer;
+            }
+
+            .tabs {
+                display: grid;
+                grid-template-columns: repeat(4, 1fr);
+
+                gap: 5px;
+                margin: 11px 0 12px;
+            }
+
+            .tab {
+                height: 34px;
+
+                border: 1px solid #444;
+                border-radius: 7px;
+
+                color: #cccccc;
+                background: #2b2b2b;
+
+                cursor: pointer;
+
+                font-size: 11px;
+                font-weight: 700;
+            }
+
+            .tab.active {
+                color: #ffffff;
+                background: #ff5a00;
+                border-color: #ff5a00;
+            }
+
+            .pane {
+                display: none;
+            }
+
+            .pane.active {
+                display: block;
+            }
+
+            .title {
+                margin-bottom: 9px;
+
+                color: #ff7a2f;
+                font-weight: 700;
+            }
+
+            .row {
+                display: flex;
+                align-items: center;
+                justify-content: space-between;
+
+                gap: 10px;
+                margin: 8px 0;
+            }
+
+            .num {
+                width: 96px;
+                height: 31px;
+
+                padding: 4px 7px;
+
+                border: 1px solid #555;
+                border-radius: 6px;
+
+                color: #ffffff;
+                background: #292929;
+
+                font-weight: 700;
+                text-align: center;
+            }
+
+            .range {
+                width: 100%;
+                accent-color: #ff5a00;
+            }
+
+            .scale {
+                display: flex;
+                justify-content: space-between;
+
+                color: #999999;
+                font-size: 11px;
+            }
+
+            .check {
+                width: 17px;
+                height: 17px;
+
+                accent-color: #ff5a00;
+            }
+
+            .btn {
+                width: 100%;
+                min-height: 34px;
+
+                margin-top: 9px;
+                padding: 7px 9px;
+
+                border: 0;
+                border-radius: 7px;
+
+                color: #ffffff;
+                background: #3a3a3a;
+
+                cursor: pointer;
+                font-weight: 700;
+            }
+
+            .btn.primary {
+                background: #ff5a00;
+            }
+
+            .btn:disabled {
+                opacity: .65;
+                cursor: wait;
+            }
+
+            .placeholder {
+                padding: 14px;
+
+                border: 1px dashed #555;
+                border-radius: 8px;
+
+                color: #aaaaaa;
+                text-align: center;
+            }
+
+            .card {
+                margin-top: 10px;
+                padding: 11px;
+
+                border: 1px solid #444;
+                border-radius: 8px;
+
+                background: #272727;
+            }
+
+            .summary {
+                display: grid;
+                grid-template-columns:
+                    minmax(0, 1fr)
+                    auto;
+
+                gap: 6px 10px;
+            }
+
+            .summary strong {
+                text-align: right;
+            }
+
+            .verdict {
+                margin-top: 11px;
+                padding: 15px 12px;
+
+                border-radius: 9px;
+                text-align: center;
+            }
+
+            .verdict.banger {
+                border: 2px solid #24ce55;
+                background: rgba(36,206,85,.12);
+            }
+
+            .verdict.good {
+                border: 2px solid #70c756;
+                background: rgba(112,199,86,.12);
+            }
+
+            .verdict.medium {
+                border: 2px solid #e3b63e;
+                background: rgba(227,182,62,.12);
+            }
+
+            .verdict.bad {
+                border: 2px solid #e05252;
+                background: rgba(224,82,82,.12);
+            }
+
+            .vlabel {
+                font-size: 23px;
+                font-weight: 900;
+            }
+
+            .score {
+                font-size: 17px;
+                font-weight: 700;
+            }
+
+            .desc {
+                margin-top: 8px;
+
+                color: #d0d0d0;
+                font-size: 12px;
+            }
+
+            .note {
+                margin-top: 9px;
+
+                color: #aaaaaa;
+                font-size: 11px;
+            }
+
+            .filterSummary {
+                margin-top: 10px;
+                padding: 9px;
+
+                border-radius: 7px;
+                background: #292929;
+
+                color: #cccccc;
+                font-size: 12px;
+            }
+
+            .price {
+                color: #75e68b;
+                font-size: 18px;
+            }
+
+            .danger {
+                color: #ff7979;
+            }
+        `;
+
+        document.documentElement
+            .appendChild(style);
+    }
+
+    function createPanel() {
+        if (
+            !document.body ||
+            document.getElementById(
+                'natan-panel-v63'
+            )
+        ) {
+            return;
+        }
+
+        const panel =
+            document.createElement(
+                'div'
+            );
+
+        panel.id =
+            'natan-panel-v63';
+
+        panel.classList.toggle(
+            'collapsed',
+            state.collapsed
+        );
+
+        panel.innerHTML = `
+            <div class="hdr">
+                <span>
+                    Allegro – skaner v6.3
+                </span>
+
+                <button
+                    id="natan-collapse"
+                    class="collapse"
+                >
+                    ${state.collapsed ? '+' : '—'}
+                </button>
+            </div>
+
+            <div class="body">
+                <div class="tabs">
+                    <button
+                        class="tab"
+                        data-tab="category"
+                    >
+                        Kategoria
+                    </button>
+
+                    <button
+                        class="tab"
+                        data-tab="product"
+                    >
+                        Produkt
+                    </button>
+
+                    <button
+                        class="tab"
+                        data-tab="filter"
+                    >
+                        Filtr
+                    </button>
+
+                    <button
+                        class="tab"
+                        data-tab="advanced"
+                    >
+                        Więcej
+                    </button>
+                </div>
+
+                <section
+                    id="pane-category"
+                    class="pane"
+                >
+                    <div class="title">
+                        Analiza kategorii
+                    </div>
+
+                    <div class="row">
+                        <label>
+                            Próg sprzedaży:
+                        </label>
+
+                        <input
+                            id="category-min"
+                            class="num"
+                            type="number"
+                            min="1"
+                            max="9999"
+                            value="${state.categoryMinSales}"
+                        >
+                    </div>
+
+                    <div class="row">
+                        <label>
+                            Maks. ofert:
+                        </label>
+
+                        <input
+                            id="category-max"
+                            class="num"
+                            type="number"
+                            min="100"
+                            max="999999"
+                            value="${state.maxCategoryOffers}"
+                        >
+                    </div>
+
+                    <div class="row">
+                        <label>
+                            Min. mocnych:
+                        </label>
+
+                        <input
+                            id="category-strong"
+                            class="num"
+                            type="number"
+                            min="1"
+                            max="100"
+                            value="${state.minStrongOffers}"
+                        >
+                    </div>
+
+                    <button
+                        id="natan-category-run"
+                        class="btn primary"
+                    >
+                        Analizuj kategorię
+                    </button>
+
+                    <div id="category-result">
+                        <div class="placeholder">
+                            Kliknij „Analizuj kategorię”.
+                        </div>
+                    </div>
+                </section>
+
+                <section
+                    id="pane-product"
+                    class="pane"
+                >
+                    <div class="title">
+                        Analiza produktu
+                    </div>
+
+                    <div class="note">
+                        Sprzedaż poniżej 50 = odrzucenie.
+                        Oficjalny sklep tej samej marki i mniej niż 8 ofert = odrzucenie.
+                    </div>
+
+                    <button
+                        id="natan-product-run"
+                        class="btn primary"
+                    >
+                        Analizuj produkt
+                    </button>
+
+                    <div id="product-result">
+                        <div class="placeholder">
+                            Otwórz stronę produktu i kliknij „Analizuj produkt”.
+                        </div>
+                    </div>
+                </section>
+
+                <section
+                    id="pane-filter"
+                    class="pane"
+                >
+                    <div class="title">
+                        Filtr ofert
+                    </div>
+
+                    <div class="row">
+                        <label>
+                            Pokazuj od:
+                        </label>
+
+                        <input
+                            id="filter-num"
+                            class="num"
+                            type="number"
+                            min="0"
+                            max="999"
+                            value="${state.filterMinSales}"
+                        >
+                    </div>
+
+                    <input
+                        id="filter-range"
+                        class="range"
+                        type="range"
+                        min="0"
+                        max="999"
+                        value="${state.filterMinSales}"
+                    >
+
+                    <div class="scale">
+                        <span>0</span>
+                        <span>999</span>
+                    </div>
+
+                    <div class="row">
+                        <label>
+                            Ukrywaj sponsorowane:
+                        </label>
+
+                        <input
+                            id="hide-sponsored"
+                            class="check"
+                            type="checkbox"
+                            ${state.hideSponsored ? 'checked' : ''}
+                        >
+                    </div>
+
+                    <div class="row">
+                        <label>
+                            Ukrywaj bez sprzedaży:
+                        </label>
+
+                        <input
+                            id="hide-unknown"
+                            class="check"
+                            type="checkbox"
+                            ${state.hideUnknown ? 'checked' : ''}
+                        >
+                    </div>
+
+                    <button
+                        id="apply-filter"
+                        class="btn primary"
+                    >
+                        Zastosuj filtr
+                    </button>
+
+                    <button
+                        id="remove-filter"
+                        class="btn"
+                    >
+                        Pokaż wszystkie
+                    </button>
+
+                    <div
+                        id="filter-result"
+                        class="filterSummary"
+                    >
+                        Filtr nie został uruchomiony.
+                    </div>
+                </section>
+
+                <section
+                    id="pane-advanced"
+                    class="pane"
+                >
+                    <div class="title">
+                        Dane zaawansowane
+                    </div>
+
+                    <div id="advanced-result">
+                        <div class="placeholder">
+                            Szczegóły pojawią się po analizie kategorii.
+                        </div>
+                    </div>
+
+                    <button
+                        id="reset-settings"
+                        class="btn"
+                    >
+                        Przywróć ustawienia domyślne
+                    </button>
+                </section>
+            </div>
+        `;
+
+        document.body.appendChild(
+            panel
+        );
+
+        bind();
+        activate(
+            state.activeTab
+        );
+    }
+
+    function activate(name) {
+        const valid = [
+            'category',
+            'product',
+            'filter',
+            'advanced'
+        ];
+
+        const selected =
+            valid.includes(name)
+                ? name
+                : 'category';
+
+        state.activeTab =
+            selected;
+
+        save();
+
+        document
+            .querySelectorAll(
+                '.tab'
+            )
+            .forEach(
+                button => {
+                    button.classList
+                        .toggle(
+                            'active',
+                            button.dataset.tab ===
+                            selected
+                        );
+                }
+            );
+
+        document
+            .querySelectorAll(
+                '.pane'
+            )
+            .forEach(
+                pane => {
+                    pane.classList
+                        .toggle(
+                            'active',
+                            pane.id ===
+                            `pane-${selected}`
+                        );
+                }
+            );
+    }
+
+    function bind() {
+        const panel =
+            document.getElementById(
+                'natan-panel-v63'
+            );
+
+        document
+            .getElementById(
+                'natan-collapse'
+            )
+            .onclick =
+            event => {
+                state.collapsed =
+                    !state.collapsed;
+
+                panel.classList
+                    .toggle(
+                        'collapsed',
+                        state.collapsed
+                    );
+
+                event.currentTarget
+                    .textContent =
+                    state.collapsed
+                        ? '+'
+                        : '—';
+
+                save();
+            };
+
+        document
+            .querySelectorAll(
+                '.tab'
+            )
+            .forEach(
+                button => {
+                    button.onclick =
+                        () =>
+                            activate(
+                                button.dataset.tab
+                            );
+                }
+            );
+
+        const bindNumber = (
+            id,
+            property,
+            minimum,
+            maximum
+        ) => {
+            document
+                .getElementById(id)
+                .addEventListener(
+                    'input',
+                    event => {
+                        if (
+                            event.target
+                                .value === ''
+                        ) {
+                            return;
+                        }
+
+                        state[property] =
+                            clamp(
+                                Math.round(
+                                    Number(
+                                        event.target
+                                            .value
+                                    )
+                                ),
+                                minimum,
+                                maximum
+                            );
+
+                        event.target.value =
+                            state[property];
+
+                        save();
+                    }
+                );
+        };
+
+        bindNumber(
+            'category-min',
+            'categoryMinSales',
+            1,
+            9999
+        );
+
+        bindNumber(
+            'category-max',
+            'maxCategoryOffers',
+            100,
+            999999
+        );
+
+        bindNumber(
+            'category-strong',
+            'minStrongOffers',
+            1,
+            100
+        );
+
+        const filterRange =
+            document.getElementById(
+                'filter-range'
+            );
+
+        const filterNumber =
+            document.getElementById(
+                'filter-num'
+            );
+
+        const setFilter =
+            value => {
+                state.filterMinSales =
+                    clamp(
+                        Math.round(
+                            Number(value)
+                        ),
+                        0,
+                        999
+                    );
+
+                filterRange.value =
+                    state.filterMinSales;
+
+                filterNumber.value =
+                    state.filterMinSales;
+
+                save();
+            };
+
+        filterRange.oninput =
+            event =>
+                setFilter(
+                    event.target.value
+                );
+
+        filterNumber.oninput =
+            event => {
+                if (
+                    event.target.value !== ''
+                ) {
+                    setFilter(
+                        event.target.value
+                    );
+                }
+            };
+
+        document
+            .getElementById(
+                'hide-sponsored'
+            )
+            .onchange =
+            event => {
+                state.hideSponsored =
+                    event.target.checked;
+
+                save();
+            };
+
+        document
+            .getElementById(
+                'hide-unknown'
+            )
+            .onchange =
+            event => {
+                state.hideUnknown =
+                    event.target.checked;
+
+                save();
+            };
+
+        document
+            .getElementById(
+                'natan-category-run'
+            )
+            .onclick =
+            runCategory;
+
+        document
+            .getElementById(
+                'natan-product-run'
+            )
+            .onclick =
+            runProduct;
+
+        document
+            .getElementById(
+                'apply-filter'
+            )
+            .onclick =
+            applyFilter;
+
+        document
+            .getElementById(
+                'remove-filter'
+            )
+            .onclick =
+            removeFilter;
+
+        document
+            .getElementById(
+                'reset-settings'
+            )
+            .onclick =
+            reset;
+    }
+
+    function renderCategory() {
+        if (!lastCategory) {
+            return;
+        }
+
+        const analysis =
+            lastCategory;
+
+        const verdict =
+            analysis.verdict;
+
+        document
+            .getElementById(
+                'category-result'
+            )
+            .innerHTML = `
+                <div class="verdict ${verdict.cls}">
+                    <div class="vlabel">
+                        ${verdict.label}
+                    </div>
+
+                    <div class="score">
+                        ${analysis.score}/100
+                    </div>
+
+                    <div class="desc">
+                        ${esc(verdict.desc)}
+                    </div>
+                </div>
+
+                <div class="card">
+                    <div class="summary">
+                        <span>Kategoria:</span>
+                        <strong>${esc(analysis.name)}</strong>
+
+                        <span>Liczba ofert:</span>
+                        <strong>${fmt(analysis.count)}</strong>
+
+                        <span>
+                            Oferty ≥ ${state.categoryMinSales}:
+                        </span>
+                        <strong>${fmt(analysis.strong)}</strong>
+
+                        <span>Najwyższa sprzedaż:</span>
+                        <strong>${fmt(analysis.max)}</strong>
+                    </div>
+                </div>
+            `;
+    }
+
+    function renderAdvanced() {
+        if (!lastCategory) {
+            return;
+        }
+
+        const analysis =
+            lastCategory;
+
+        document
+            .getElementById(
+                'advanced-result'
+            )
+            .innerHTML = `
+                <div class="card">
+                    <div class="summary">
+                        <span>Wykryte oferty:</span>
+                        <strong>${fmt(analysis.detected)}</strong>
+
+                        <span>Ze sprzedażą:</span>
+                        <strong>${fmt(analysis.withSales)}</strong>
+
+                        <span>Średnia TOP 5:</span>
+                        <strong>${fmt(analysis.top5)}</strong>
+
+                        <span>Organiczne:</span>
+                        <strong>${fmt(analysis.organic)}</strong>
+
+                        <span>Sponsorowane:</span>
+                        <strong>${fmt(analysis.promoted)}</strong>
+
+                        <span>Mocne organiczne:</span>
+                        <strong>${fmt(analysis.strongOrganic)}</strong>
+
+                        <span>Mocne sponsorowane:</span>
+                        <strong>${fmt(analysis.strongPromoted)}</strong>
+
+                        <span>Bez danych:</span>
+                        <strong>${fmt(analysis.unknown)}</strong>
+
+                        <span>Czas:</span>
+                        <strong>${fmt(analysis.ms)} ms</strong>
+                    </div>
+                </div>
+            `;
+    }
+
+    function renderFilter() {
+        if (!lastFilter) {
+            return;
+        }
+
+        const result =
+            lastFilter;
+
+        document
+            .getElementById(
+                'filter-result'
+            )
+            .innerHTML = `
+                Widoczne:
+                <strong>${result.visible}</strong>
+                <br>
+
+                Ukryte przez sprzedaż:
+                <strong>${result.low}</strong>
+                <br>
+
+                Ukryte sponsorowane:
+                <strong>${result.sponsored}</strong>
+                <br>
+
+                Ukryte bez danych:
+                <strong>${result.unknown}</strong>
+                <br>
+
+                Czas:
+                <strong>${result.ms} ms</strong>
+            `;
+    }
+
+    function renderProduct() {
+        if (!lastProduct) {
+            return;
+        }
+
+        const analysis =
+            lastProduct;
+
+        const verdict =
+            analysis.verdict;
+
+        const price =
+            analysis.pricing;
+
+        const priceBlock =
+            price
+                ? `
+                    <span>Cena zakupu:</span>
+                    <strong>
+                        ${fmt(price.purchase, 2)} zł
+                    </strong>
+
+                    <span>Prowizja:</span>
+                    <strong>12%</strong>
+
+                    <span>Dostawa:</span>
+                    <strong>0,00 zł</strong>
+
+                    <span>Docelowy zysk:</span>
+                    <strong>100,00 zł</strong>
+
+                    <span>Cena minimalna:</span>
+                    <strong>
+                        ${fmt(price.minimum, 2)} zł
+                    </strong>
+
+                    <span>Cena sugerowana:</span>
+                    <strong class="price">
+                        ${fmt(price.suggested, 2)} zł
+                    </strong>
+
+                    <span>Zysk netto:</span>
+                    <strong>
+                        ${fmt(price.netProfit, 2)} zł
+                    </strong>
+                `
+                : `
+                    <span class="danger">
+                        Nie wykryto ceny produktu.
+                    </span>
+                `;
+
+        document
+            .getElementById(
+                'product-result'
+            )
+            .innerHTML = `
+                <div class="verdict ${verdict.cls}">
+                    <div class="vlabel">
+                        ${verdict.label}
+                    </div>
+
+                    <div class="score">
+                        ${analysis.score}/100
+                    </div>
+
+                    <div class="desc">
+                        ${esc(verdict.desc)}
+                    </div>
+                </div>
+
+                <div class="card">
+                    <div class="summary">
+                        <span>Produkt:</span>
+                        <strong>${esc(analysis.title)}</strong>
+
+                        <span>Sprzedaż produktu:</span>
+                        <strong>${fmt(analysis.sales)}</strong>
+
+                        <span>Ocena:</span>
+                        <strong>
+                            ${
+                                analysis.rating === null
+                                    ? '—'
+                                    : fmt(analysis.rating, 2)
+                            }
+                        </strong>
+
+                        <span>Oceny:</span>
+                        <strong>${fmt(analysis.ratings)}</strong>
+
+                        <span>Recenzje:</span>
+                        <strong>${fmt(analysis.reviews)}</strong>
+
+                        <span>Ofert w katalogu:</span>
+                        <strong>${fmt(analysis.offers)}</strong>
+
+                        <span>Marka:</span>
+                        <strong>${esc(analysis.brand)}</strong>
+
+                        <span>Oficjalny sklep:</span>
+                        <strong>
+                            ${analysis.official ? 'TAK' : 'NIE'}
+                        </strong>
+
+                        <span>Marka = sklep:</span>
+                        <strong>
+                            ${analysis.brandMatchesShop ? 'TAK' : 'NIE'}
+                        </strong>
+                    </div>
+                </div>
+
+                <div class="card">
+                    <div class="summary">
+                        ${priceBlock}
+                    </div>
+                </div>
+            `;
+    }
+
+    function start() {
+        addStyles();
+        createPanel();
+
+        console.log(
+            '[Natan Allegro v6.3] Uruchomiono bez pętli i bez MutationObserver.'
+        );
+    }
+
+    start();
+})();
