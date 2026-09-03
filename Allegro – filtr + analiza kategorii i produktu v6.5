@@ -1,0 +1,8453 @@
+// ==UserScript==
+// @name         Allegro – filtr + analiza kategorii i produktu v6.5
+// @namespace    natan-allegro
+// @version      6.5.0
+// @description  Filtr ofert, analiza kategorii i produktu, SMART kalkulator oraz automatyczny Product Finder z bazą danych.
+// @match        https://allegro.pl/*
+// @match        https://www.allegro.pl/*
+// @run-at       document-idle
+// @grant        none
+// ==/UserScript==
+
+(() => {
+    'use strict';
+
+    const PREFIX = 'natan-allegro-v63-';
+    const FINDER_DB_NAME = 'natan-allegro-product-finder-v1';
+    const FINDER_DB_VERSION = 1;
+    const FINDER_PRODUCTS_STORE = 'products';
+    const FINDER_CHECKS_STORE = 'checks';
+
+    const DEFAULTS = {
+        activeTab: 'category',
+        collapsed: false,
+
+        categoryMinSales: 100,
+        maxCategoryOffers: 10000,
+        minStrongOffers: 3,
+
+        filterMinSales: 0,
+        hideSponsored: false,
+        hideUnknown: false,
+
+        profitMode: 'percent',
+        profitPercent: 25,
+        profitCustom: 100,
+
+        finderMaxPrice: 1000,
+        finderBlockedBrands: 'Apple',
+        finderAutoSave: true,
+
+        finderMinSales: 100,
+        finderMaxPages: 5,
+        finderMode: 'auto',
+
+        finderExcludedCategories:
+`Moda
+Odzież
+Obuwie
+Bielizna
+Czapki`,
+
+        finderView: 'finder',
+
+        finderStatusFilter: 'ACCEPTED',
+        finderDateFilter: 'today',
+        finderSort: 'score-desc',
+        finderSearch: ''
+    };
+
+    const key = name => PREFIX + name;
+
+    const clamp = (value, min, max) =>
+        Math.min(max, Math.max(min, value));
+
+    const load = (name, fallback) =>
+        localStorage.getItem(key(name)) ?? fallback;
+
+    const loadBool = (name, fallback) => {
+        const value = localStorage.getItem(key(name));
+
+        return value === null
+            ? fallback
+            : value === 'true';
+    };
+
+    const loadNum = (name, fallback, min, max) => {
+        const value = Number(
+            localStorage.getItem(key(name))
+        );
+
+        return Number.isFinite(value)
+            ? clamp(value, min, max)
+            : fallback;
+    };
+
+    const state = {
+        activeTab: load(
+            'activeTab',
+            DEFAULTS.activeTab
+        ),
+
+        collapsed: loadBool(
+            'collapsed',
+            DEFAULTS.collapsed
+        ),
+
+        categoryMinSales: loadNum(
+            'categoryMinSales',
+            DEFAULTS.categoryMinSales,
+            1,
+            9999
+        ),
+
+        maxCategoryOffers: loadNum(
+            'maxCategoryOffers',
+            DEFAULTS.maxCategoryOffers,
+            100,
+            999999
+        ),
+
+        minStrongOffers: loadNum(
+            'minStrongOffers',
+            DEFAULTS.minStrongOffers,
+            1,
+            100
+        ),
+
+        filterMinSales: loadNum(
+            'filterMinSales',
+            DEFAULTS.filterMinSales,
+            0,
+            999
+        ),
+
+        hideSponsored: loadBool(
+            'hideSponsored',
+            DEFAULTS.hideSponsored
+        ),
+
+        hideUnknown: loadBool(
+            'hideUnknown',
+            DEFAULTS.hideUnknown
+        ),
+
+        profitMode:
+            ['percent', 'custom'].includes(
+                load(
+                    'profitMode',
+                    DEFAULTS.profitMode
+                )
+            )
+                ? load(
+                    'profitMode',
+                    DEFAULTS.profitMode
+                )
+                : DEFAULTS.profitMode,
+
+        profitPercent: loadNum(
+            'profitPercent',
+            DEFAULTS.profitPercent,
+            1,
+            200
+        ),
+
+        profitCustom: loadNum(
+            'profitCustom',
+            DEFAULTS.profitCustom,
+            0,
+            10000
+        ),
+
+        finderMaxPrice: loadNum(
+            'finderMaxPrice',
+            DEFAULTS.finderMaxPrice,
+            1,
+            100000
+        ),
+
+        finderBlockedBrands: load(
+            'finderBlockedBrands',
+            DEFAULTS.finderBlockedBrands
+        ),
+
+        finderAutoSave: loadBool(
+            'finderAutoSave',
+            DEFAULTS.finderAutoSave
+        ),
+
+        finderMinSales: loadNum(
+            'finderMinSales',
+            DEFAULTS.finderMinSales,
+            1,
+            9999
+        ),
+
+        finderMaxPages: loadNum(
+            'finderMaxPages',
+            DEFAULTS.finderMaxPages,
+            1,
+            100
+        ),
+
+        finderMode:
+            ['auto', 'current'].includes(
+                load(
+                    'finderMode',
+                    DEFAULTS.finderMode
+                )
+            )
+                ? load(
+                    'finderMode',
+                    DEFAULTS.finderMode
+                )
+                : DEFAULTS.finderMode,
+
+        finderExcludedCategories: load(
+            'finderExcludedCategories',
+            DEFAULTS.finderExcludedCategories
+        ),
+
+        finderView:
+            ['finder', 'database'].includes(
+                load(
+                    'finderView',
+                    DEFAULTS.finderView
+                )
+            )
+                ? load(
+                    'finderView',
+                    DEFAULTS.finderView
+                )
+                : DEFAULTS.finderView,
+
+        finderStatusFilter:
+            [
+                'ALL',
+                'ACCEPTED',
+                'MAYBE',
+                'REJECTED',
+                'SKIPPED'
+            ].includes(
+                load(
+                    'finderStatusFilter',
+                    DEFAULTS.finderStatusFilter
+                )
+            )
+                ? load(
+                    'finderStatusFilter',
+                    DEFAULTS.finderStatusFilter
+                )
+                : DEFAULTS.finderStatusFilter,
+
+        finderDateFilter:
+            ['all', 'today'].includes(
+                load(
+                    'finderDateFilter',
+                    DEFAULTS.finderDateFilter
+                )
+            )
+                ? load(
+                    'finderDateFilter',
+                    DEFAULTS.finderDateFilter
+                )
+                : DEFAULTS.finderDateFilter,
+
+        finderSort:
+            [
+                'score-desc',
+                'score-asc',
+                'sales-desc',
+                'latest',
+                'oldest'
+            ].includes(
+                load(
+                    'finderSort',
+                    DEFAULTS.finderSort
+                )
+            )
+                ? load(
+                    'finderSort',
+                    DEFAULTS.finderSort
+                )
+                : DEFAULTS.finderSort,
+
+        finderSearch: load(
+            'finderSearch',
+            DEFAULTS.finderSearch
+        )
+    };
+
+    const CLS = {
+        hiddenSales:
+            'natan-hidden-sales-v63',
+
+        hiddenSponsored:
+            'natan-hidden-sponsored-v63',
+
+        hiddenUnknown:
+            'natan-hidden-unknown-v63'
+    };
+
+    let lastCategory = null;
+    let lastProduct = null;
+    let lastFilter = null;
+
+    let lastFinderRows = [];
+
+    let finderDbPromise = null;
+    let finderCrawlerBusy = false;
+
+    const migrationVersion = Number(
+        localStorage.getItem(
+            key('migrationVersion')
+        ) || 0
+    );
+
+    if (migrationVersion < 640) {
+        state.categoryMinSales = Math.max(
+            100,
+            state.categoryMinSales
+        );
+
+        localStorage.setItem(
+            key('categoryMinSales'),
+            String(state.categoryMinSales)
+        );
+
+        localStorage.setItem(
+            key('migrationVersion'),
+            '640'
+        );
+    }
+
+    function save() {
+        Object.entries(state)
+            .forEach(
+                ([name, value]) =>
+                    localStorage.setItem(
+                        key(name),
+                        String(value)
+                    )
+            );
+    }
+
+    function reset() {
+        Object.keys(localStorage)
+            .filter(
+                item =>
+                    item.startsWith(PREFIX)
+            )
+            .forEach(
+                item =>
+                    localStorage.removeItem(
+                        item
+                    )
+            );
+
+        clearFilter();
+
+        location.reload();
+    }
+
+    const norm = value =>
+        String(value ?? '')
+            .replace(/\u00a0/g, ' ')
+            .replace(/\s+/g, ' ')
+            .trim()
+            .toLowerCase();
+
+    const esc = value =>
+        String(value ?? '')
+            .replaceAll('&', '&amp;')
+            .replaceAll('<', '&lt;')
+            .replaceAll('>', '&gt;')
+            .replaceAll('"', '&quot;')
+            .replaceAll(
+                "'",
+                '&#039;'
+            );
+
+    const fmt = (
+        value,
+        digits = 0
+    ) =>
+        Number.isFinite(value)
+            ? value.toLocaleString(
+                'pl-PL',
+                {
+                    minimumFractionDigits:
+                        digits,
+
+                    maximumFractionDigits:
+                        digits
+                }
+            )
+            : '—';
+
+    const avg = values =>
+        values.length
+            ? Math.round(
+                values.reduce(
+                    (sum, value) =>
+                        sum + value,
+                    0
+                ) /
+                values.length
+            )
+            : 0;
+
+    const pad2 = value =>
+        String(value).padStart(
+            2,
+            '0'
+        );
+
+    function localIso(
+        date = new Date()
+    ) {
+        const offset =
+            -date.getTimezoneOffset();
+
+        const sign =
+            offset >= 0
+                ? '+'
+                : '-';
+
+        const abs =
+            Math.abs(offset);
+
+        return (
+            `${date.getFullYear()}-` +
+            `${pad2(
+                date.getMonth() + 1
+            )}-` +
+            `${pad2(
+                date.getDate()
+            )}T` +
+            `${pad2(
+                date.getHours()
+            )}:` +
+            `${pad2(
+                date.getMinutes()
+            )}:` +
+            `${pad2(
+                date.getSeconds()
+            )}` +
+            `${sign}` +
+            `${pad2(
+                Math.floor(abs / 60)
+            )}:` +
+            `${pad2(abs % 60)}`
+        );
+    }
+
+    function localDayKey(
+        date = new Date()
+    ) {
+        return (
+            `${date.getFullYear()}-` +
+            `${pad2(
+                date.getMonth() + 1
+            )}-` +
+            `${pad2(
+                date.getDate()
+            )}`
+        );
+    }
+
+    function formatCheckedAt(
+        value
+    ) {
+        if (!value)
+            return '—';
+
+        const date =
+            new Date(value);
+
+        if (
+            Number.isNaN(
+                date.getTime()
+            )
+        )
+            return String(value);
+
+        return (
+            `${pad2(
+                date.getDate()
+            )}.` +
+            `${pad2(
+                date.getMonth() + 1
+            )}.` +
+            `${date.getFullYear()} ` +
+            `${pad2(
+                date.getHours()
+            )}:` +
+            `${pad2(
+                date.getMinutes()
+            )}:` +
+            `${pad2(
+                date.getSeconds()
+            )}`
+        );
+    }
+
+    function cleanBrand(value) {
+        return norm(value)
+            .replace(
+                /[^a-z0-9ąćęłńóśźż]/g,
+                ''
+            );
+    }
+
+    function blockedBrands() {
+        return String(
+            state.finderBlockedBrands ||
+            ''
+        )
+            .split(/[\n,;]+/)
+            .map(
+                value =>
+                    value.trim()
+            )
+            .filter(Boolean);
+    }
+
+    function blockedBrandMatch(
+        brand
+    ) {
+        const current =
+            cleanBrand(brand);
+
+        if (
+            !current ||
+            current ===
+                cleanBrand(
+                    'Nie wykryto'
+                )
+        )
+            return null;
+
+        return (
+            blockedBrands()
+                .find(
+                    item =>
+                        cleanBrand(item) ===
+                        current
+                ) ||
+            null
+        );
+    }
+
+    function canonicalOfferUrl() {
+        const canonical =
+            document.querySelector(
+                'link[rel="canonical"]'
+            )?.href;
+
+        return (
+            canonical ||
+            `${location.origin}${location.pathname}`
+        );
+    }
+
+    function currentOfferId() {
+        const url =
+            canonicalOfferUrl();
+
+        const fromUrl =
+            url.match(
+                /-(\d{8,})(?:[/?#]|$)/
+            );
+
+        if (fromUrl)
+            return fromUrl[1];
+
+        const source =
+            document
+                .documentElement
+                ?.innerHTML ||
+            '';
+
+        const patterns = [
+            /["']offerId["']\s*:\s*["']?(\d{8,})["']?/i,
+
+            /["']offer_id["']\s*:\s*["']?(\d{8,})["']?/i
+        ];
+
+        for (
+            const pattern of patterns
+        ) {
+            const match =
+                pattern.exec(
+                    source
+                );
+
+            if (match)
+                return match[1];
+        }
+
+        return null;
+    }
+
+    function currentProductId() {
+        const productLink =
+            document.querySelector(
+                'a[href*="/produkt/"]'
+            )?.href || '';
+
+        const uuid =
+            productLink.match(
+                /([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i
+            );
+
+        if (uuid)
+            return uuid[1];
+
+        const source =
+            document
+                .documentElement
+                ?.innerHTML ||
+            '';
+
+        const patterns = [
+            /["']catalogProductId["']\s*:\s*["']([^"']+)["']/i,
+
+            /["']productId["']\s*:\s*["']([^"']+)["']/i,
+
+            /["']product_id["']\s*:\s*["']([^"']+)["']/i
+        ];
+
+        for (
+            const pattern of patterns
+        ) {
+            const match =
+                pattern.exec(
+                    source
+                );
+
+            if (match)
+                return match[1];
+        }
+
+        return null;
+    }
+
+    function productCategoryContext() {
+        const selectors = [
+            'nav a[href*="/kategoria/"]',
+            'nav a[href*="/dzial/"]',
+            '[aria-label*="breadcrumb" i] a[href*="/kategoria/"]',
+            '[aria-label*="breadcrumb" i] a[href*="/dzial/"]'
+        ];
+
+        const seen =
+            new Set();
+
+        const items = [];
+
+        for (
+            const selector of selectors
+        ) {
+            for (
+                const anchor of document.querySelectorAll(
+                    selector
+                )
+            ) {
+                const name =
+                    (
+                        anchor.textContent ||
+                        ''
+                    ).trim();
+
+                const href =
+                    anchor.href || '';
+
+                if (
+                    !name ||
+                    !href ||
+                    seen.has(href)
+                )
+                    continue;
+
+                seen.add(href);
+
+                items.push({
+                    name,
+                    href
+                });
+            }
+        }
+
+        const last =
+            items.at(-1);
+
+        return {
+            name:
+                last?.name ||
+                'Nie wykryto',
+
+            url:
+                last?.href ||
+                '',
+
+            path:
+                items
+                    .map(
+                        item =>
+                            item.name
+                    )
+                    .join(' > ')
+        };
+    }
+
+    function productIdentity(
+        analysis
+    ) {
+        if (
+            analysis.productId
+        )
+            return `product:${analysis.productId}`;
+
+        if (analysis.gtin)
+            return `gtin:${analysis.gtin}`;
+
+        if (
+            analysis.offerId
+        )
+            return `offer:${analysis.offerId}`;
+
+        return `url:${
+            analysis.url ||
+            canonicalOfferUrl()
+        }`;
+    }
+
+    function openFinderDb() {
+        if (finderDbPromise)
+            return finderDbPromise;
+
+        finderDbPromise =
+            new Promise(
+                (
+                    resolve,
+                    reject
+                ) => {
+                    const request =
+                        indexedDB.open(
+                            FINDER_DB_NAME,
+                            FINDER_DB_VERSION
+                        );
+
+                    request.onupgradeneeded =
+                        () => {
+                            const db =
+                                request.result;
+
+                            if (
+                                !db.objectStoreNames.contains(
+                                    FINDER_PRODUCTS_STORE
+                                )
+                            ) {
+                                const products =
+                                    db.createObjectStore(
+                                        FINDER_PRODUCTS_STORE,
+                                        {
+                                            keyPath:
+                                                'key'
+                                        }
+                                    );
+
+                                products.createIndex(
+                                    'status',
+                                    'status',
+                                    {
+                                        unique:
+                                            false
+                                    }
+                                );
+
+                                products.createIndex(
+                                    'lastCheckedAt',
+                                    'lastCheckedAt',
+                                    {
+                                        unique:
+                                            false
+                                    }
+                                );
+
+                                products.createIndex(
+                                    'score',
+                                    'score',
+                                    {
+                                        unique:
+                                            false
+                                    }
+                                );
+                            }
+
+                            if (
+                                !db.objectStoreNames.contains(
+                                    FINDER_CHECKS_STORE
+                                )
+                            ) {
+                                const checks =
+                                    db.createObjectStore(
+                                        FINDER_CHECKS_STORE,
+                                        {
+                                            keyPath:
+                                                'id',
+
+                                            autoIncrement:
+                                                true
+                                        }
+                                    );
+
+                                checks.createIndex(
+                                    'key',
+                                    'key',
+                                    {
+                                        unique:
+                                            false
+                                    }
+                                );
+
+                                checks.createIndex(
+                                    'checkedAt',
+                                    'checkedAt',
+                                    {
+                                        unique:
+                                            false
+                                    }
+                                );
+                            }
+                        };
+
+                    request.onsuccess =
+                        () =>
+                            resolve(
+                                request.result
+                            );
+
+                    request.onerror =
+                        () =>
+                            reject(
+                                request.error ||
+                                new Error(
+                                    'Nie udało się otworzyć bazy Product Finder.'
+                                )
+                            );
+                }
+            );
+
+        return finderDbPromise;
+    }
+
+    function transactionDone(
+        transaction
+    ) {
+        return new Promise(
+            (
+                resolve,
+                reject
+            ) => {
+                transaction.oncomplete =
+                    () =>
+                        resolve();
+
+                transaction.onerror =
+                    () =>
+                        reject(
+                            transaction.error ||
+                            new Error(
+                                'Błąd transakcji IndexedDB.'
+                            )
+                        );
+
+                transaction.onabort =
+                    () =>
+                        reject(
+                            transaction.error ||
+                            new Error(
+                                'Transakcja IndexedDB została przerwana.'
+                            )
+                        );
+            }
+        );
+    }
+
+    function requestValue(
+        request
+    ) {
+        return new Promise(
+            (
+                resolve,
+                reject
+            ) => {
+                request.onsuccess =
+                    () =>
+                        resolve(
+                            request.result
+                        );
+
+                request.onerror =
+                    () =>
+                        reject(
+                            request.error ||
+                            new Error(
+                                'Błąd odczytu IndexedDB.'
+                            )
+                        );
+            }
+        );
+    }
+
+    async function finderGetProduct(
+        keyValue
+    ) {
+        const db =
+            await openFinderDb();
+
+        const tx =
+            db.transaction(
+                FINDER_PRODUCTS_STORE,
+                'readonly'
+            );
+
+        const result =
+            await requestValue(
+                tx
+                    .objectStore(
+                        FINDER_PRODUCTS_STORE
+                    )
+                    .get(
+                        keyValue
+                    )
+            );
+
+        await transactionDone(
+            tx
+        );
+
+        return result || null;
+    }
+
+    async function finderGetAllProducts() {
+        const db =
+            await openFinderDb();
+
+        const tx =
+            db.transaction(
+                FINDER_PRODUCTS_STORE,
+                'readonly'
+            );
+
+        const result =
+            await requestValue(
+                tx
+                    .objectStore(
+                        FINDER_PRODUCTS_STORE
+                    )
+                    .getAll()
+            );
+
+        await transactionDone(
+            tx
+        );
+
+        return Array.isArray(
+            result
+        )
+            ? result
+            : [];
+    }
+
+    async function finderClearDatabase() {
+        const db =
+            await openFinderDb();
+
+        const tx =
+            db.transaction(
+                [
+                    FINDER_PRODUCTS_STORE,
+                    FINDER_CHECKS_STORE
+                ],
+                'readwrite'
+            );
+
+        tx
+            .objectStore(
+                FINDER_PRODUCTS_STORE
+            )
+            .clear();
+
+        tx
+            .objectStore(
+                FINDER_CHECKS_STORE
+            )
+            .clear();
+
+        await transactionDone(
+            tx
+        );
+    }
+
+    function sleep(ms) {
+        return new Promise(
+            resolve =>
+                setTimeout(
+                    resolve,
+                    ms
+                )
+        );
+    }
+
+    function defaultFinderCrawlerState() {
+        return {
+            status: 'idle',
+            mode: state.finderMode,
+
+            startedAt: null,
+            finishedAt: null,
+
+            rootUrl: '',
+            rootName: '',
+
+            currentCategory: null,
+            currentPage: 1,
+
+            currentCategoryBudget: 1,
+            currentCategoryScore: null,
+            currentCategoryVerdict: '',
+
+            categoryQueue: [],
+            visitedCategories: [],
+
+            pendingProducts: [],
+            nextListingUrl: '',
+
+            seenOfferIds: [],
+
+            lastMessage:
+                'Gotowy do startu.',
+
+            lastUrl: '',
+
+            counters: {
+                categories: 0,
+                categoriesDone: 0,
+                categoriesSkipped: 0,
+
+                pages: 0,
+
+                candidates: 0,
+
+                analyzed: 0,
+                accepted: 0,
+                maybe: 0,
+                rejected: 0,
+                skipped: 0,
+
+                knownSkipped: 0
+            }
+        };
+    }
+
+    function loadFinderCrawlerState() {
+        try {
+            const raw =
+                localStorage.getItem(
+                    key(
+                        'finderCrawlerState'
+                    )
+                );
+
+            if (!raw)
+                return defaultFinderCrawlerState();
+
+            const parsed =
+                JSON.parse(raw);
+
+            return {
+                ...defaultFinderCrawlerState(),
+                ...parsed,
+
+                counters: {
+                    ...defaultFinderCrawlerState()
+                        .counters,
+
+                    ...(
+                        parsed.counters ||
+                        {}
+                    )
+                }
+            };
+        } catch (error) {
+            console.warn(
+                '[Natan Allegro] Uszkodzony stan Product Findera — resetuję automat.',
+                error
+            );
+
+            return defaultFinderCrawlerState();
+        }
+    }
+
+    function saveFinderCrawlerState(
+        crawler
+    ) {
+        localStorage.setItem(
+            key(
+                'finderCrawlerState'
+            ),
+            JSON.stringify(crawler)
+        );
+
+        renderFinderAutomation(
+            crawler
+        );
+    }
+
+    function crawlerStatusLabel(
+        status
+    ) {
+        if (
+            status === 'running'
+        )
+            return '🟢 PRACUJE';
+
+        if (
+            status === 'paused'
+        )
+            return '🟡 PAUZA';
+
+        if (
+            status === 'finished'
+        )
+            return '✅ ZAKOŃCZONY';
+
+        if (
+            status === 'stopped'
+        )
+            return '⛔ ZATRZYMANY';
+
+        if (
+            status === 'error'
+        )
+            return '❌ BŁĄD';
+
+        return '⚪ GOTOWY';
+    }
+
+    function pageBaseUrl(
+        raw = location.href
+    ) {
+        try {
+            const url =
+                new URL(
+                    raw,
+                    location.origin
+                );
+
+            url.hash = '';
+
+            url.searchParams.delete(
+                'p'
+            );
+
+            return (
+                `${url.origin}` +
+                `${url.pathname}` +
+                `${url.search
+                    ? url.search
+                    : ''}`
+            );
+        } catch {
+            return String(
+                raw || ''
+            );
+        }
+    }
+
+    function categoryKeyFromUrl(
+        raw
+    ) {
+        try {
+            const url =
+                new URL(
+                    raw,
+                    location.origin
+                );
+
+            return (
+                `${url.origin}` +
+                `${url.pathname}`
+            ).toLowerCase();
+        } catch {
+            return String(
+                raw || ''
+            ).toLowerCase();
+        }
+    }
+
+    function isProductOfferPage() {
+        return /\/oferta\//i.test(
+            location.pathname
+        );
+    }
+
+    function categoryBlacklistTokens() {
+        return String(
+            state.finderExcludedCategories ||
+            ''
+        )
+            .split(/[\n,;]+/)
+            .map(
+                value =>
+                    norm(value)
+            )
+            .filter(Boolean);
+    }
+
+    function excludedCategoryMatch(
+        name
+    ) {
+        const current =
+            norm(name);
+
+        if (!current)
+            return null;
+
+        return (
+            categoryBlacklistTokens()
+                .find(
+                    token =>
+                        current === token ||
+                        current.startsWith(
+                            `${token} `
+                        ) ||
+                        current.startsWith(
+                            `${token}-`
+                        )
+                ) ||
+            null
+        );
+    }
+
+    function getSubcategoryLinks() {
+        const selectors = [
+            '#links-list-Categories a[data-role="LinkItemAnchor"][href]',
+
+            '[data-role="Categories"] a[data-role="LinkItemAnchor"][href]'
+        ];
+
+        const result = [];
+        const seen =
+            new Set();
+
+        for (
+            const selector of selectors
+        ) {
+            for (
+                const anchor of document.querySelectorAll(
+                    selector
+                )
+            ) {
+                const name =
+                    (
+                        anchor.textContent ||
+                        ''
+                    ).trim();
+
+                const href =
+                    anchor.href ||
+                    anchor.getAttribute(
+                        'href'
+                    ) ||
+                    '';
+
+                if (
+                    !name ||
+                    !href
+                )
+                    continue;
+
+                let url;
+
+                try {
+                    url =
+                        new URL(
+                            href,
+                            location.origin
+                        );
+                } catch {
+                    continue;
+                }
+
+                if (
+                    !/\/(?:kategoria|dzial)\//i.test(
+                        url.pathname
+                    )
+                )
+                    continue;
+
+                const keyValue =
+                    categoryKeyFromUrl(
+                        url.href
+                    );
+
+                if (
+                    seen.has(
+                        keyValue
+                    )
+                )
+                    continue;
+
+                seen.add(
+                    keyValue
+                );
+
+                let meta = null;
+
+                const rawMeta =
+                    anchor.getAttribute(
+                        'data-custom-params'
+                    );
+
+                if (rawMeta) {
+                    try {
+                        meta =
+                            JSON.parse(
+                                rawMeta
+                            );
+                    } catch {}
+                }
+
+                result.push({
+                    name:
+                        meta?.name ||
+                        name,
+
+                    id:
+                        meta?.id ||
+                        null,
+
+                    count:
+                        Number.isFinite(
+                            Number(
+                                meta?.count
+                            )
+                        )
+                            ? Number(
+                                meta.count
+                            )
+                            : null,
+
+                    url:
+                        pageBaseUrl(
+                            url.href
+                        )
+                });
+            }
+        }
+
+        return result;
+    }
+
+    function offerUrlFromArticle(
+        article
+    ) {
+        const anchors = [
+            ...article.querySelectorAll(
+                'h2 a[href], a[href*="/oferta/"][href]'
+            )
+        ];
+
+        for (
+            const anchor of anchors
+        ) {
+            const raw =
+                anchor.href ||
+                anchor.getAttribute(
+                    'href'
+                ) ||
+                '';
+
+            if (!raw)
+                continue;
+
+            try {
+                const url =
+                    new URL(
+                        raw,
+                        location.origin
+                    );
+
+                if (
+                    /\/oferta\//i.test(
+                        url.pathname
+                    )
+                )
+                    return url.href;
+            } catch {}
+        }
+
+        const fallback =
+            anchors[0];
+
+        if (!fallback)
+            return null;
+
+        try {
+            return new URL(
+                fallback.href ||
+                fallback.getAttribute(
+                    'href'
+                ),
+                location.origin
+            ).href;
+        } catch {
+            return null;
+        }
+    }
+
+    function offerIdFromUrl(
+        raw
+    ) {
+        const match =
+            String(raw || '')
+                .match(
+                    /-(\d{8,})(?:[/?#]|$)/
+                );
+
+        return match
+            ? match[1]
+            : null;
+    }
+
+    function nextListingPageUrl() {
+        const direct =
+            document.querySelector(
+                'a[rel="next"][href], a[aria-label*="następna" i][href], a[title*="następna" i][href]'
+            );
+
+        if (
+            direct?.href
+        )
+            return direct.href;
+
+        const currentP =
+            Number(
+                new URL(
+                    location.href
+                )
+                    .searchParams
+                    .get('p') ||
+                1
+            );
+
+        const candidates = [
+            ...document.querySelectorAll(
+                'a[href]'
+            )
+        ];
+
+        for (
+            const anchor of candidates
+        ) {
+            try {
+                const url =
+                    new URL(
+                        anchor.href,
+                        location.origin
+                    );
+
+                const p =
+                    Number(
+                        url.searchParams
+                            .get('p')
+                    );
+
+                if (
+                    Number.isFinite(
+                        p
+                    ) &&
+                    p ===
+                        currentP + 1 &&
+                    url.pathname ===
+                        location.pathname
+                ) {
+                    return url.href;
+                }
+            } catch {}
+        }
+
+        return null;
+    }
+
+    function categoryScanBudget(
+        analysis
+    ) {
+        const maxPages =
+            clamp(
+                Math.round(
+                    state.finderMaxPages
+                ),
+                1,
+                100
+            );
+
+        if (!analysis)
+            return 1;
+
+        if (
+            analysis.score >= 85
+        )
+            return maxPages;
+
+        if (
+            analysis.score >= 65
+        )
+            return Math.min(
+                maxPages,
+                Math.max(
+                    3,
+                    Math.ceil(
+                        maxPages *
+                        0.7
+                    )
+                )
+            );
+
+        if (
+            analysis.score >= 45
+        )
+            return Math.min(
+                maxPages,
+                2
+            );
+
+        return 1;
+    }
+
+    async function finderKnownOfferIds() {
+        const rows =
+            await finderGetAllProducts();
+
+        return new Set(
+            rows
+                .map(
+                    row =>
+                        String(
+                            row.offerId ||
+                            ''
+                        )
+                )
+                .filter(Boolean)
+        );
+    }
+
+    function enqueueDiscoveredCategories(
+        crawler
+    ) {
+        if (
+            crawler.mode !== 'auto'
+        )
+            return;
+
+        const visited =
+            new Set(
+                crawler.visitedCategories ||
+                []
+            );
+
+        const queued =
+            new Set(
+                (
+                    crawler.categoryQueue ||
+                    []
+                )
+                    .map(
+                        item =>
+                            categoryKeyFromUrl(
+                                item.url
+                            )
+                    )
+            );
+
+        const children =
+            getSubcategoryLinks();
+
+        for (
+            const child of children
+        ) {
+            const categoryKey =
+                categoryKeyFromUrl(
+                    child.url
+                );
+
+            if (
+                visited.has(
+                    categoryKey
+                ) ||
+                queued.has(
+                    categoryKey
+                )
+            )
+                continue;
+
+            const blocked =
+                excludedCategoryMatch(
+                    child.name
+                );
+
+            if (blocked) {
+                crawler
+                    .counters
+                    .categoriesSkipped++;
+
+                continue;
+            }
+
+            crawler
+                .categoryQueue
+                .push({
+                    ...child,
+
+                    depth:
+                        (
+                            crawler
+                                .currentCategory
+                                ?.depth ||
+                            0
+                        ) + 1
+                });
+
+            queued.add(
+                categoryKey
+            );
+        }
+    }
+
+    async function waitForFinderPageReady(
+        timeout = 12000
+    ) {
+        const started =
+            Date.now();
+
+        while (
+            Date.now() -
+            started <
+            timeout
+        ) {
+            if (
+                isProductOfferPage()
+            ) {
+                if (
+                    document.querySelector(
+                        'h1'
+                    )
+                )
+                    return true;
+            } else {
+                if (
+                    getOfferArticles()
+                        .length ||
+                    getSubcategoryLinks()
+                        .length ||
+                    document.querySelector(
+                        'h1'
+                    )
+                )
+                    return true;
+            }
+
+            await sleep(400);
+        }
+
+        return false;
+    }
+
+    function crawlerControlAllowsRun(
+        crawler
+    ) {
+        const latest =
+            loadFinderCrawlerState();
+
+        if (
+            latest.startedAt &&
+            crawler.startedAt &&
+            latest.startedAt ===
+                crawler.startedAt &&
+            [
+                'paused',
+                'stopped'
+            ].includes(
+                latest.status
+            )
+        ) {
+            crawler.status =
+                latest.status;
+
+            crawler.lastMessage =
+                latest.lastMessage;
+
+            return false;
+        }
+
+        return (
+            crawler.status ===
+            'running'
+        );
+    }
+
+    function crawlerNavigate(
+        crawler,
+        url,
+        message
+    ) {
+        if (
+            !url ||
+            !crawlerControlAllowsRun(
+                crawler
+            )
+        ) {
+            saveFinderCrawlerState(
+                crawler
+            );
+
+            return false;
+        }
+
+        if (message)
+            crawler.lastMessage =
+                message;
+
+        crawler.lastUrl =
+            url;
+
+        saveFinderCrawlerState(
+            crawler
+        );
+
+        location.href =
+            url;
+
+        return true;
+    }
+
+    async function crawlerAdvanceCategory(
+        crawler
+    ) {
+        if (
+            crawler.mode ===
+            'current'
+        ) {
+            crawler.status =
+                'finished';
+
+            crawler.finishedAt =
+                localIso();
+
+            crawler.lastMessage =
+                'Zakończono skanowanie obecnej kategorii.';
+
+            saveFinderCrawlerState(
+                crawler
+            );
+
+            return;
+        }
+
+        const visited =
+            new Set(
+                crawler.visitedCategories ||
+                []
+            );
+
+        while (
+            crawler.categoryQueue
+                .length
+        ) {
+            const next =
+                crawler.categoryQueue
+                    .shift();
+
+            const nextKey =
+                categoryKeyFromUrl(
+                    next.url
+                );
+
+            if (
+                visited.has(
+                    nextKey
+                )
+            )
+                continue;
+
+            const blocked =
+                excludedCategoryMatch(
+                    next.name
+                );
+
+            if (blocked) {
+                crawler
+                    .counters
+                    .categoriesSkipped++;
+
+                continue;
+            }
+
+            crawler.currentCategory =
+                next;
+
+            crawler.currentPage =
+                1;
+
+            crawler.currentCategoryBudget =
+                1;
+
+            crawler.currentCategoryScore =
+                null;
+
+            crawler.currentCategoryVerdict =
+                '';
+
+            crawler.pendingProducts =
+                [];
+
+            crawler.nextListingUrl =
+                '';
+
+            crawler
+                .visitedCategories
+                .push(
+                    nextKey
+                );
+
+            crawler
+                .counters
+                .categories++;
+
+            crawler.lastMessage =
+                `Przechodzę do kategorii: ${next.name}`;
+
+            saveFinderCrawlerState(
+                crawler
+            );
+
+            crawlerNavigate(
+                crawler,
+                next.url,
+                crawler.lastMessage
+            );
+
+            return;
+        }
+
+        crawler.status =
+            'finished';
+
+        crawler.finishedAt =
+            localIso();
+
+        crawler.lastMessage =
+            'Kolejka kategorii zakończona.';
+
+        saveFinderCrawlerState(
+            crawler
+        );
+    }
+
+    async function crawlerContinueAfterProducts(
+        crawler
+    ) {
+        if (
+            crawler.pendingProducts
+                ?.length
+        ) {
+            const next =
+                crawler.pendingProducts
+                    .shift();
+
+            crawlerNavigate(
+                crawler,
+                next.url,
+                `Analizuję produkt ${crawler.counters.analyzed + 1}: ${
+                    next.title ||
+                    next.offerId ||
+                    'oferta'
+                }`
+            );
+
+            return;
+        }
+
+        if (
+            crawler.nextListingUrl
+        ) {
+            const nextUrl =
+                crawler.nextListingUrl;
+
+            crawler.nextListingUrl =
+                '';
+
+            crawler.currentPage++;
+
+            crawlerNavigate(
+                crawler,
+                nextUrl,
+                `Kategoria ${
+                    crawler
+                        .currentCategory
+                        ?.name ||
+                    '—'
+                } — strona ${
+                    crawler.currentPage
+                }/${
+                    crawler
+                        .currentCategoryBudget
+                }`
+            );
+
+            return;
+        }
+
+        crawler
+            .counters
+            .categoriesDone++;
+
+        crawler.currentCategory =
+            null;
+
+        crawler.currentPage =
+            1;
+
+        crawler.currentCategoryBudget =
+            1;
+
+        crawler.currentCategoryScore =
+            null;
+
+        crawler.currentCategoryVerdict =
+            '';
+
+        await crawlerAdvanceCategory(
+            crawler
+        );
+    }
+
+    async function crawlerHandleProduct(
+        crawler
+    ) {
+        const offerId =
+            currentOfferId();
+
+        const productId =
+            currentProductId();
+
+        if (productId) {
+            const existing =
+                await finderGetProduct(
+                    `product:${productId}`
+                );
+
+            if (existing) {
+                crawler
+                    .counters
+                    .knownSkipped++;
+
+                if (
+                    offerId &&
+                    !crawler
+                        .seenOfferIds
+                        .includes(
+                            String(
+                                offerId
+                            )
+                        )
+                ) {
+                    crawler
+                        .seenOfferIds
+                        .push(
+                            String(
+                                offerId
+                            )
+                        );
+                }
+
+                crawler.lastMessage =
+                    `Pomijam znany Product ID: ${productId}`;
+
+                crawlerControlAllowsRun(
+                    crawler
+                );
+
+                saveFinderCrawlerState(
+                    crawler
+                );
+
+                if (
+                    crawler.status ===
+                    'running'
+                ) {
+                    await crawlerContinueAfterProducts(
+                        crawler
+                    );
+                }
+
+                return;
+            }
+        }
+
+        const analysis =
+            analyzeProduct();
+
+        lastProduct =
+            analysis;
+
+        let record;
+
+        try {
+            record =
+                await finderSaveAnalysis(
+                    analysis
+                );
+
+            analysis.finderRecord =
+                record;
+
+            analysis.finderSaved =
+                true;
+        } catch (error) {
+            console.error(
+                '[Natan Allegro] Automat: błąd zapisu produktu.',
+                error
+            );
+
+            crawler
+                .counters
+                .skipped++;
+
+            crawler.lastMessage =
+                'Błąd zapisu produktu — przechodzę dalej.';
+
+            saveFinderCrawlerState(
+                crawler
+            );
+
+            await crawlerContinueAfterProducts(
+                crawler
+            );
+
+            return;
+        }
+
+        crawler
+            .counters
+            .analyzed++;
+
+        if (
+            record.status ===
+            'ACCEPTED'
+        ) {
+            crawler
+                .counters
+                .accepted++;
+        } else if (
+            record.status ===
+            'MAYBE'
+        ) {
+            crawler
+                .counters
+                .maybe++;
+        } else if (
+            record.status ===
+            'REJECTED'
+        ) {
+            crawler
+                .counters
+                .rejected++;
+        } else {
+            crawler
+                .counters
+                .skipped++;
+        }
+
+        if (
+            analysis.offerId &&
+            !crawler
+                .seenOfferIds
+                .includes(
+                    String(
+                        analysis.offerId
+                    )
+                )
+        ) {
+            crawler
+                .seenOfferIds
+                .push(
+                    String(
+                        analysis.offerId
+                    )
+                );
+
+            if (
+                crawler
+                    .seenOfferIds
+                    .length >
+                15000
+            ) {
+                crawler
+                    .seenOfferIds
+                    .splice(
+                        0,
+                        crawler
+                            .seenOfferIds
+                            .length -
+                        15000
+                    );
+            }
+        }
+
+        crawler.lastMessage =
+            `${
+                finderStatusLabel(
+                    record.status
+                )
+            } · ${
+                analysis.sales ??
+                '—'
+            } sprzedaży · ${
+                analysis.title
+            }`;
+
+        crawlerControlAllowsRun(
+            crawler
+        );
+
+        saveFinderCrawlerState(
+            crawler
+        );
+
+        if (
+            state.activeTab ===
+            'product'
+        )
+            renderProduct();
+
+        if (
+            state.activeTab ===
+                'finder' &&
+            state.finderView ===
+                'database'
+        )
+            renderFinderDatabase();
+
+        if (
+            crawler.status !==
+            'running'
+        )
+            return;
+
+        await sleep(250);
+
+        await crawlerContinueAfterProducts(
+            crawler
+        );
+    }
+
+    async function crawlerHandleListing(
+        crawler
+    ) {
+        const records =
+            offerRecords();
+
+        const subcategories =
+            getSubcategoryLinks();
+
+        if (
+            !crawler.currentCategory
+        ) {
+            const detectedName =
+                categoryName();
+
+            crawler.currentCategory =
+                {
+                    name:
+                        detectedName,
+
+                    url:
+                        pageBaseUrl(
+                            location.href
+                        ),
+
+                    depth: 0
+                };
+
+            const currentKey =
+                categoryKeyFromUrl(
+                    crawler
+                        .currentCategory
+                        .url
+                );
+
+            if (
+                !crawler
+                    .visitedCategories
+                    .includes(
+                        currentKey
+                    )
+            ) {
+                crawler
+                    .visitedCategories
+                    .push(
+                        currentKey
+                    );
+
+                crawler
+                    .counters
+                    .categories++;
+            }
+        }
+
+        if (
+            crawler.currentPage ===
+            1
+        ) {
+            enqueueDiscoveredCategories(
+                crawler
+            );
+
+            if (
+                records.length
+            ) {
+                const analysis =
+                    analyzeCategory();
+
+                crawler.currentCategoryScore =
+                    analysis.score;
+
+                crawler.currentCategoryVerdict =
+                    analysis
+                        .verdict
+                        ?.label ||
+                    '';
+
+                crawler.currentCategoryBudget =
+                    categoryScanBudget(
+                        analysis
+                    );
+            } else {
+                crawler.currentCategoryScore =
+                    null;
+
+                crawler.currentCategoryVerdict =
+                    subcategories.length
+                        ? 'NAWIGACJA'
+                        : 'BRAK DANYCH';
+
+                crawler.currentCategoryBudget =
+                    1;
+            }
+        }
+
+        crawler
+            .counters
+            .pages++;
+
+        if (
+            !records.length
+        ) {
+            crawler.pendingProducts =
+                [];
+
+            crawler.nextListingUrl =
+                '';
+
+            crawler.lastMessage =
+                subcategories.length
+                    ? `Znaleziono ${subcategories.length} podkategorii — przechodzę głębiej.`
+                    : 'Na stronie nie wykryto ofert ani kandydatów.';
+
+            crawlerControlAllowsRun(
+                crawler
+            );
+
+            saveFinderCrawlerState(
+                crawler
+            );
+
+            if (
+                crawler.status ===
+                'running'
+            ) {
+                await crawlerContinueAfterProducts(
+                    crawler
+                );
+            }
+
+            return;
+        }
+
+        let knownOffers;
+
+        try {
+            knownOffers =
+                await finderKnownOfferIds();
+        } catch {
+            knownOffers =
+                new Set();
+        }
+
+        const seenThisPage =
+            new Set();
+
+        const runSeen =
+            new Set(
+                (
+                    crawler
+                        .seenOfferIds ||
+                    []
+                ).map(String)
+            );
+
+        const candidates =
+            [];
+
+        for (
+            const record of records
+        ) {
+            if (
+                record.sales ===
+                    null ||
+                record.sales <
+                    state.finderMinSales
+            )
+                continue;
+
+            const url =
+                offerUrlFromArticle(
+                    record.article
+                );
+
+            if (!url)
+                continue;
+
+            const offerId =
+                offerIdFromUrl(
+                    url
+                );
+
+            const dedupeKey =
+                offerId ||
+                url;
+
+            if (
+                seenThisPage.has(
+                    dedupeKey
+                )
+            )
+                continue;
+
+            seenThisPage.add(
+                dedupeKey
+            );
+
+            if (
+                offerId &&
+                (
+                    knownOffers.has(
+                        String(
+                            offerId
+                        )
+                    ) ||
+                    runSeen.has(
+                        String(
+                            offerId
+                        )
+                    )
+                )
+            ) {
+                crawler
+                    .counters
+                    .knownSkipped++;
+
+                continue;
+            }
+
+            const title =
+                (
+                    record.article
+                        .querySelector(
+                            'h2'
+                        )
+                        ?.textContent ||
+                    ''
+                ).trim();
+
+            candidates.push({
+                url,
+                offerId,
+                title,
+
+                listSales:
+                    record.sales,
+
+                sponsored:
+                    record.sponsored
+            });
+        }
+
+        candidates.sort(
+            (a, b) =>
+                (
+                    b.listSales ??
+                    0
+                ) -
+                (
+                    a.listSales ??
+                    0
+                )
+        );
+
+        crawler
+            .counters
+            .candidates +=
+                candidates.length;
+
+        crawler.pendingProducts =
+            candidates;
+
+        const nextPage =
+            nextListingPageUrl();
+
+        crawler.nextListingUrl =
+            nextPage &&
+            crawler.currentPage <
+                crawler
+                    .currentCategoryBudget
+                ? nextPage
+                : '';
+
+        crawler.lastMessage =
+            `Kategoria: ${
+                crawler
+                    .currentCategory
+                    ?.name ||
+                categoryName()
+            } · strona ${
+                crawler.currentPage
+            }/${
+                crawler
+                    .currentCategoryBudget
+            } · kandydaci ≥${
+                state.finderMinSales
+            }: ${
+                candidates.length
+            }`;
+
+        crawlerControlAllowsRun(
+            crawler
+        );
+
+        saveFinderCrawlerState(
+            crawler
+        );
+
+        if (
+            crawler.status !==
+            'running'
+        )
+            return;
+
+        await crawlerContinueAfterProducts(
+            crawler
+        );
+    }
+
+    async function resumeFinderCrawler() {
+        if (finderCrawlerBusy)
+            return;
+
+        const crawler =
+            loadFinderCrawlerState();
+
+        if (
+            crawler.status !==
+            'running'
+        ) {
+            renderFinderAutomation(
+                crawler
+            );
+
+            return;
+        }
+
+        finderCrawlerBusy =
+            true;
+
+        try {
+            const ready =
+                await waitForFinderPageReady();
+
+            if (!ready) {
+                crawler.status =
+                    'error';
+
+                crawler.lastMessage =
+                    'Strona nie załadowała danych w wymaganym czasie. Kliknij START, aby wznowić.';
+
+                saveFinderCrawlerState(
+                    crawler
+                );
+
+                return;
+            }
+
+            if (
+                isProductOfferPage()
+            ) {
+                await crawlerHandleProduct(
+                    crawler
+                );
+            } else {
+                await crawlerHandleListing(
+                    crawler
+                );
+            }
+        } catch (error) {
+            console.error(
+                '[Natan Allegro] Product Finder automat — błąd.',
+                error
+            );
+
+            crawler.status =
+                'error';
+
+            crawler.lastMessage =
+                `Błąd automatu: ${
+                    error?.message ||
+                    error
+                }`;
+
+            saveFinderCrawlerState(
+                crawler
+            );
+        } finally {
+            finderCrawlerBusy =
+                false;
+        }
+    }
+
+    function resolveFinderRoot() {
+        if (
+            isProductOfferPage()
+        ) {
+            const category =
+                productCategoryContext();
+
+            if (
+                category.url
+            ) {
+                return {
+                    url:
+                        pageBaseUrl(
+                            category.url
+                        ),
+
+                    name:
+                        category.name
+                };
+            }
+
+            return null;
+        }
+
+        if (
+            /\/(?:kategoria|dzial)\//i.test(
+                location.pathname
+            ) ||
+            getOfferArticles()
+                .length ||
+            getSubcategoryLinks()
+                .length
+        ) {
+            return {
+                url:
+                    pageBaseUrl(
+                        location.href
+                    ),
+
+                name:
+                    categoryName() !==
+                    'Nie wykryto'
+                        ? categoryName()
+                        : (
+                            document.title ||
+                            'Aktualna kategoria'
+                        )
+            };
+        }
+
+        return null;
+    }
+
+    function startFinderCrawler() {
+        let crawler =
+            loadFinderCrawlerState();
+
+        if (
+            crawler.status ===
+                'paused' ||
+            crawler.status ===
+                'error'
+        ) {
+            crawler.status =
+                'running';
+
+            crawler.lastMessage =
+                'Wznawiam Product Finder.';
+
+            saveFinderCrawlerState(
+                crawler
+            );
+
+            resumeFinderCrawler();
+
+            return;
+        }
+
+        const root =
+            resolveFinderRoot();
+
+        if (!root) {
+            alert(
+                'Otwórz najpierw kategorię/dział Allegro albo stronę produktu należącego do kategorii.'
+            );
+
+            return;
+        }
+
+        const blocked =
+            excludedCategoryMatch(
+                root.name
+            );
+
+        if (blocked) {
+            alert(
+                `Ta kategoria pasuje do blacklisty: ${blocked}. Usuń ją z blacklisty albo uruchom Finder w innej kategorii.`
+            );
+
+            return;
+        }
+
+        crawler =
+            defaultFinderCrawlerState();
+
+        crawler.status =
+            'running';
+
+        crawler.mode =
+            state.finderMode;
+
+        crawler.startedAt =
+            localIso();
+
+        crawler.rootUrl =
+            root.url;
+
+        crawler.rootName =
+            root.name;
+
+        crawler.currentCategory =
+            {
+                name:
+                    root.name,
+
+                url:
+                    root.url,
+
+                depth: 0
+            };
+
+        crawler.currentPage =
+            1;
+
+        crawler.visitedCategories =
+            [
+                categoryKeyFromUrl(
+                    root.url
+                )
+            ];
+
+        crawler
+            .counters
+            .categories =
+                1;
+
+        crawler.lastMessage =
+            `Start: ${root.name}`;
+
+        saveFinderCrawlerState(
+            crawler
+        );
+
+        if (
+            pageBaseUrl(
+                location.href
+            ) !==
+            root.url
+        ) {
+            crawlerNavigate(
+                crawler,
+                root.url,
+                `Przechodzę do kategorii startowej: ${root.name}`
+            );
+        } else {
+            resumeFinderCrawler();
+        }
+    }
+
+    function pauseFinderCrawler() {
+        const crawler =
+            loadFinderCrawlerState();
+
+        if (
+            crawler.status !==
+            'running'
+        )
+            return;
+
+        crawler.status =
+            'paused';
+
+        crawler.lastMessage =
+            'Automat zatrzymany na pauzie. START wznowi od tego miejsca.';
+
+        saveFinderCrawlerState(
+            crawler
+        );
+    }
+
+    function stopFinderCrawler() {
+        const crawler =
+            loadFinderCrawlerState();
+
+        crawler.status =
+            'stopped';
+
+        crawler.finishedAt =
+            localIso();
+
+        crawler.pendingProducts =
+            [];
+
+        crawler.nextListingUrl =
+            '';
+
+        crawler.categoryQueue =
+            [];
+
+        crawler.lastMessage =
+            'Product Finder zatrzymany. Baza produktów została zachowana.';
+
+        saveFinderCrawlerState(
+            crawler
+        );
+    }
+
+    function renderFinderAutomation(
+        crawler =
+            loadFinderCrawlerState()
+    ) {
+        const status =
+            document.getElementById(
+                'finder-auto-status'
+            );
+
+        const details =
+            document.getElementById(
+                'finder-auto-details'
+            );
+
+        const startButton =
+            document.getElementById(
+                'finder-start'
+            );
+
+        const pauseButton =
+            document.getElementById(
+                'finder-pause'
+            );
+
+        if (status) {
+            status.textContent =
+                crawlerStatusLabel(
+                    crawler.status
+                );
+
+            status.className =
+                `finder-run-status ${
+                    crawler.status ||
+                    'idle'
+                }`;
+        }
+
+        if (startButton) {
+            startButton.textContent =
+                crawler.status ===
+                    'paused' ||
+                crawler.status ===
+                    'error'
+                    ? '▶ WZNÓW'
+                    : '▶ START';
+        }
+
+        if (pauseButton) {
+            pauseButton.disabled =
+                crawler.status !==
+                'running';
+        }
+
+        if (details) {
+            const c =
+                crawler.counters ||
+                {};
+
+            details.innerHTML = `
+<div class="summary">
+    <span>Kategoria:</span>
+    <strong>${esc(
+        crawler
+            .currentCategory
+            ?.name ||
+        crawler.rootName ||
+        '—'
+    )}</strong>
+
+    <span>Priorytet:</span>
+    <strong>${
+        crawler
+            .currentCategoryVerdict
+            ? `${
+                esc(
+                    crawler
+                        .currentCategoryVerdict
+                )
+            } ${
+                crawler
+                    .currentCategoryScore ===
+                null
+                    ? ''
+                    : `(${crawler.currentCategoryScore}/100)`
+            }`
+            : '—'
+    }</strong>
+
+    <span>Strona:</span>
+    <strong>${
+        fmt(
+            crawler.currentPage ||
+            0
+        )
+    } / ${
+        fmt(
+            crawler
+                .currentCategoryBudget ||
+            0
+        )
+    }</strong>
+
+    <span>Kolejka kategorii:</span>
+    <strong>${
+        fmt(
+            crawler
+                .categoryQueue
+                ?.length ||
+            0
+        )
+    }</strong>
+
+    <span>Sprawdzone kategorie:</span>
+    <strong>${
+        fmt(
+            c.categoriesDone ||
+            0
+        )
+    } / ${
+        fmt(
+            c.categories ||
+            0
+        )
+    }</strong>
+
+    <span>Strony:</span>
+    <strong>${fmt(
+        c.pages || 0
+    )}</strong>
+
+    <span>Kandydaci:</span>
+    <strong>${fmt(
+        c.candidates || 0
+    )}</strong>
+
+    <span>Przeanalizowane:</span>
+    <strong>${fmt(
+        c.analyzed || 0
+    )}</strong>
+
+    <span>❤️ Accepted:</span>
+    <strong>${fmt(
+        c.accepted || 0
+    )}</strong>
+
+    <span>🟡 Maybe:</span>
+    <strong>${fmt(
+        c.maybe || 0
+    )}</strong>
+
+    <span>❌ Rejected:</span>
+    <strong>${fmt(
+        c.rejected || 0
+    )}</strong>
+
+    <span>Znane pominięte:</span>
+    <strong>${fmt(
+        c.knownSkipped || 0
+    )}</strong>
+</div>
+
+<div class="finder-log">
+    ${esc(
+        crawler.lastMessage ||
+        '—'
+    )}
+</div>
+`;
+        }
+    }
+
+    function finderAutoStatus(
+        analysis
+    ) {
+        if (
+            analysis.sales ===
+            null
+        )
+            return 'SKIPPED';
+
+        if (
+            analysis.price !==
+                null &&
+            analysis.price >
+                state.finderMaxPrice
+        )
+            return 'REJECTED';
+
+        if (
+            blockedBrandMatch(
+                analysis.brand
+            )
+        )
+            return 'REJECTED';
+
+        if (
+            analysis.sales <
+            state.finderMinSales
+        )
+            return 'REJECTED';
+
+        if (
+            analysis.official &&
+            analysis.brandMatchesShop &&
+            (analysis.offers ?? 0) <
+                8
+        )
+            return 'REJECTED';
+
+        if (
+            analysis.score >= 65
+        )
+            return 'ACCEPTED';
+
+        if (
+            analysis.score >= 45
+        )
+            return 'MAYBE';
+
+        return 'REJECTED';
+    }
+
+    function finderDecisionReason(
+        analysis
+    ) {
+        if (
+            analysis.price !==
+                null &&
+            analysis.price >
+                state.finderMaxPrice
+        )
+            return `PRICE_ABOVE_${Math.round(
+                state.finderMaxPrice
+            )}`;
+
+        const blocked =
+            blockedBrandMatch(
+                analysis.brand
+            );
+
+        if (blocked)
+            return `BRAND_BLOCKLIST:${blocked}`;
+
+        if (
+            analysis.sales ===
+            null
+        )
+            return 'SALES_UNKNOWN';
+
+        if (
+            analysis.sales <
+            state.finderMinSales
+        )
+            return `SALES_BELOW_${Math.round(
+                state.finderMinSales
+            )}`;
+
+        if (
+            analysis.official &&
+            analysis.brandMatchesShop &&
+            (analysis.offers ?? 0) <
+                8
+        )
+            return 'OFFICIAL_SAME_BRAND_LT8';
+
+        if (
+            analysis.score >= 85
+        )
+            return 'SCORE_BANGER';
+
+        if (
+            analysis.score >= 65
+        )
+            return 'SCORE_GOOD';
+
+        if (
+            analysis.score >= 45
+        )
+            return 'SCORE_MAYBE';
+
+        return 'SCORE_LOW';
+    }
+
+    async function finderSaveAnalysis(
+        analysis
+    ) {
+        const checkedAt =
+            localIso();
+
+        const keyValue =
+            productIdentity(
+                analysis
+            );
+
+        const previous =
+            await finderGetProduct(
+                keyValue
+            );
+
+        const autoStatus =
+            finderAutoStatus(
+                analysis
+            );
+
+        const record = {
+            key:
+                keyValue,
+
+            productId:
+                analysis.productId ||
+                null,
+
+            offerId:
+                analysis.offerId ||
+                null,
+
+            gtin:
+                analysis.gtin ||
+                null,
+
+            title:
+                analysis.title,
+
+            brand:
+                analysis.brand,
+
+            status:
+                autoStatus,
+
+            score:
+                analysis.score,
+
+            sales:
+                analysis.sales,
+
+            rating:
+                analysis.rating,
+
+            ratings:
+                analysis.ratings,
+
+            reviews:
+                analysis.reviews,
+
+            catalogueOffers:
+                analysis.offers,
+
+            price:
+                analysis.price,
+
+            category:
+                analysis.category
+                    ?.name ||
+                'Nie wykryto',
+
+            categoryPath:
+                analysis.category
+                    ?.path ||
+                '',
+
+            categoryUrl:
+                analysis.category
+                    ?.url ||
+                '',
+
+            url:
+                analysis.url ||
+                canonicalOfferUrl(),
+
+            official:
+                analysis.official,
+
+            officialShop:
+                analysis.shop,
+
+            brandMatchesShop:
+                analysis.brandMatchesShop,
+
+            decisionReason:
+                finderDecisionReason(
+                    analysis
+                ),
+
+            firstSeenAt:
+                previous
+                    ?.firstSeenAt ||
+                checkedAt,
+
+            lastCheckedAt:
+                checkedAt,
+
+            checkCount:
+                (
+                    previous
+                        ?.checkCount ||
+                    0
+                ) + 1
+        };
+
+        const db =
+            await openFinderDb();
+
+        const tx =
+            db.transaction(
+                [
+                    FINDER_PRODUCTS_STORE,
+                    FINDER_CHECKS_STORE
+                ],
+                'readwrite'
+            );
+
+        tx.objectStore(
+            FINDER_PRODUCTS_STORE
+        ).put(
+            record
+        );
+
+        tx.objectStore(
+            FINDER_CHECKS_STORE
+        ).add({
+            ...record,
+
+            checkedAt,
+
+            statusAtCheck:
+                autoStatus
+        });
+
+        await transactionDone(
+            tx
+        );
+
+        return record;
+    }
+
+    function finderStatusLabel(
+        status
+    ) {
+        if (
+            status ===
+            'ACCEPTED'
+        )
+            return '❤️ ACCEPTED';
+
+        if (
+            status ===
+            'MAYBE'
+        )
+            return '🟡 MAYBE';
+
+        if (
+            status ===
+            'REJECTED'
+        )
+            return '❌ REJECTED';
+
+        return '⏭ SKIPPED';
+    }
+
+    function filteredFinderRows(
+        rows
+    ) {
+        let result =
+            [...rows];
+
+        if (
+            state.finderStatusFilter !==
+            'ALL'
+        ) {
+            result =
+                result.filter(
+                    row =>
+                        row.status ===
+                        state.finderStatusFilter
+                );
+        }
+
+        if (
+            state.finderDateFilter ===
+            'today'
+        ) {
+            const today =
+                localDayKey();
+
+            result =
+                result.filter(
+                    row =>
+                        String(
+                            row.lastCheckedAt ||
+                            ''
+                        ).slice(
+                            0,
+                            10
+                        ) ===
+                        today
+                );
+        }
+
+        const query =
+            norm(
+                state.finderSearch
+            );
+
+        if (query) {
+            result =
+                result.filter(
+                    row =>
+                        norm(
+                            [
+                                row.title,
+                                row.brand,
+                                row.productId,
+                                row.offerId,
+                                row.gtin,
+                                row.category,
+                                row.categoryPath,
+                                row.decisionReason
+                            ].join(
+                                ' '
+                            )
+                        ).includes(
+                            query
+                        )
+                );
+        }
+
+        const sorters = {
+            'score-desc':
+                (a, b) =>
+                    (
+                        b.score ??
+                        -1
+                    ) -
+                    (
+                        a.score ??
+                        -1
+                    ) ||
+                    (
+                        b.sales ??
+                        -1
+                    ) -
+                    (
+                        a.sales ??
+                        -1
+                    ),
+
+            'score-asc':
+                (a, b) =>
+                    (
+                        a.score ??
+                        999
+                    ) -
+                    (
+                        b.score ??
+                        999
+                    ),
+
+            'sales-desc':
+                (a, b) =>
+                    (
+                        b.sales ??
+                        -1
+                    ) -
+                    (
+                        a.sales ??
+                        -1
+                    ) ||
+                    (
+                        b.score ??
+                        -1
+                    ) -
+                    (
+                        a.score ??
+                        -1
+                    ),
+
+            latest:
+                (a, b) =>
+                    String(
+                        b.lastCheckedAt ||
+                        ''
+                    ).localeCompare(
+                        String(
+                            a.lastCheckedAt ||
+                            ''
+                        )
+                    ),
+
+            oldest:
+                (a, b) =>
+                    String(
+                        a.lastCheckedAt ||
+                        ''
+                    ).localeCompare(
+                        String(
+                            b.lastCheckedAt ||
+                            ''
+                        )
+                    )
+        };
+
+        result.sort(
+            sorters[
+                state.finderSort
+            ] ||
+            sorters[
+                'score-desc'
+            ]
+        );
+
+        return result;
+    }
+
+    function csvCell(value) {
+        let text =
+            String(
+                value ??
+                ''
+            );
+
+        if (
+            /^[=+\-@]/.test(
+                text
+            )
+        )
+            text =
+                `'${text}`;
+
+        return `"${text.replaceAll(
+            '"',
+            '""'
+        )}"`;
+    }
+
+    function downloadText(
+        filename,
+        content,
+        type =
+            'text/plain;charset=utf-8'
+    ) {
+        const blob =
+            new Blob(
+                [content],
+                {
+                    type
+                }
+            );
+
+        const url =
+            URL.createObjectURL(
+                blob
+            );
+
+        const anchor =
+            document.createElement(
+                'a'
+            );
+
+        anchor.href =
+            url;
+
+        anchor.download =
+            filename;
+
+        document.body.appendChild(
+            anchor
+        );
+
+        anchor.click();
+
+        anchor.remove();
+
+        setTimeout(
+            () =>
+                URL.revokeObjectURL(
+                    url
+                ),
+            1000
+        );
+    }
+
+    function exportFinderCsv() {
+        if (
+            !lastFinderRows.length
+        ) {
+            alert(
+                'Brak widocznych produktów do eksportu.'
+            );
+
+            return;
+        }
+
+        const headers = [
+            'Status',
+            'Score',
+            'Sales',
+            'Rating',
+            'Ratings',
+            'Reviews',
+            'Catalog Offers',
+            'Price',
+            'Brand',
+            'Product ID',
+            'Offer ID',
+            'GTIN',
+            'Category',
+            'Checked At',
+            'Reason',
+            'Title',
+            'URL'
+        ];
+
+        const lines = [
+            headers
+                .map(csvCell)
+                .join(';')
+        ];
+
+        for (
+            const row of lastFinderRows
+        ) {
+            lines.push(
+                [
+                    row.status,
+                    row.score,
+                    row.sales,
+                    row.rating,
+                    row.ratings,
+                    row.reviews,
+                    row.catalogueOffers,
+                    row.price,
+                    row.brand,
+                    row.productId,
+                    row.offerId,
+                    row.gtin,
+                    row.category,
+
+                    formatCheckedAt(
+                        row.lastCheckedAt
+                    ),
+
+                    row.decisionReason,
+                    row.title,
+                    row.url
+                ]
+                    .map(csvCell)
+                    .join(';')
+            );
+        }
+
+        downloadText(
+            `product-finder-${localDayKey()}.csv`,
+
+            '\uFEFF' +
+            lines.join(
+                '\r\n'
+            ),
+
+            'text/csv;charset=utf-8'
+        );
+    }
+
+    function exportFinderJson() {
+        if (
+            !lastFinderRows.length
+        ) {
+            alert(
+                'Brak widocznych produktów do eksportu.'
+            );
+
+            return;
+        }
+
+        downloadText(
+            `product-finder-${localDayKey()}.json`,
+
+            JSON.stringify(
+                lastFinderRows,
+                null,
+                2
+            ),
+
+            'application/json;charset=utf-8'
+        );
+    }
+
+    function parseCompact(raw) {
+        const text =
+            String(raw ?? '')
+                .replace(
+                    /\u00a0/g,
+                    ''
+                )
+                .replace(
+                    /\s+/g,
+                    ''
+                )
+                .replace(
+                    ',',
+                    '.'
+                )
+                .toLowerCase();
+
+        let match =
+            text.match(
+                /^(\d+(?:\.\d+)?)tys\.?\+?$/
+            );
+
+        if (match)
+            return Math.round(
+                Number(
+                    match[1]
+                ) *
+                1000
+            );
+
+        match =
+            text.match(
+                /^(\d+(?:\.\d+)?)mln\.?\+?$/
+            );
+
+        if (match)
+            return Math.round(
+                Number(
+                    match[1]
+                ) *
+                1000000
+            );
+
+        const digits =
+            text.match(
+                /\d+/g
+            );
+
+        return digits
+            ? Number(
+                digits.join('')
+            )
+            : null;
+    }
+
+    function parseSalesText(text) {
+        const normalized =
+            norm(text);
+
+        let match =
+            normalized.match(
+                /(\d+(?:[.,]\d+)?)\s*tys\.?\s*(?:osób|osoby|osoba)\s+kupi\w*/
+            );
+
+        if (match) {
+            const value =
+                Number(
+                    match[1]
+                        .replace(
+                            ',',
+                            '.'
+                        )
+                );
+
+            return Number.isFinite(
+                value
+            )
+                ? Math.round(
+                    value *
+                    1000
+                )
+                : null;
+        }
+
+        match =
+            normalized.match(
+                /(\d[\d\s]*)\s*(?:osób|osoby|osoba)\s+kupi\w*/
+            );
+
+        if (!match)
+            return null;
+
+        const value =
+            Number(
+                match[1]
+                    .replace(
+                        /\s/g,
+                        ''
+                    )
+            );
+
+        return Number.isFinite(
+            value
+        )
+            ? value
+            : null;
+    }
+
+    function getOfferArticles() {
+        return [
+            ...document.querySelectorAll(
+                'article'
+            )
+        ].filter(
+            article => {
+                const hasTitle =
+                    Boolean(
+                        article.querySelector(
+                            'h2 a'
+                        )
+                    );
+
+                const hasOffer =
+                    Boolean(
+                        article.querySelector(
+                            'a[href*="/oferta/"], a[href*="/events/clicks"], [data-role-type="add-to-cart-button"]'
+                        )
+                    );
+
+                return (
+                    hasTitle &&
+                    hasOffer
+                );
+            }
+        );
+    }
+
+    function visualContainer(
+        article
+    ) {
+        const listItem =
+            article.closest(
+                'li'
+            );
+
+        return (
+            listItem &&
+            listItem
+                .querySelectorAll(
+                    ':scope article'
+                )
+                .length === 1
+        )
+            ? listItem
+            : article;
+    }
+
+    function offerSales(article) {
+        for (
+            const element of article.querySelectorAll(
+                '[aria-label]'
+            )
+        ) {
+            const label =
+                element.getAttribute(
+                    'aria-label'
+                ) ||
+                '';
+
+            if (
+                norm(
+                    label
+                ).includes(
+                    'kupi'
+                )
+            ) {
+                const sales =
+                    parseSalesText(
+                        label
+                    );
+
+                if (
+                    sales !==
+                    null
+                )
+                    return sales;
+            }
+        }
+
+        return parseSalesText(
+            article.textContent ||
+            ''
+        );
+    }
+
+    function offerSponsored(
+        article
+    ) {
+        for (
+            const element of article.querySelectorAll(
+                'p, span, div'
+            )
+        ) {
+            const text =
+                norm(
+                    element.textContent
+                );
+
+            if (
+                [
+                    'sponsorowane',
+                    'promowane',
+                    'oferta sponsorowana'
+                ].includes(
+                    text
+                )
+            )
+                return true;
+        }
+
+        return Boolean(
+            article.querySelector(
+                'a[href*="/events/clicks"][href*="bi_s%3Dads"], a[href*="/events/clicks"][href*="bi_s=ads"]'
+            )
+        );
+    }
+
+    function offerRecords() {
+        return getOfferArticles()
+            .map(
+                article => {
+                    const sales =
+                        offerSales(
+                            article
+                        );
+
+                    const sponsored =
+                        offerSponsored(
+                            article
+                        );
+
+                    article
+                        .dataset
+                        .natanSales =
+                            sales ===
+                            null
+                                ? 'unknown'
+                                : String(
+                                    sales
+                                );
+
+                    article
+                        .dataset
+                        .natanSponsored =
+                            String(
+                                sponsored
+                            );
+
+                    return {
+                        article,
+
+                        container:
+                            visualContainer(
+                                article
+                            ),
+
+                        sales,
+
+                        sponsored
+                    };
+                }
+            );
+    }
+
+    function clearFilter() {
+        document.querySelectorAll(
+            `.${CLS.hiddenSales}, .${CLS.hiddenSponsored}, .${CLS.hiddenUnknown}`
+        ).forEach(
+            element => {
+                element.classList.remove(
+                    CLS.hiddenSales,
+                    CLS.hiddenSponsored,
+                    CLS.hiddenUnknown
+                );
+            }
+        );
+    }
+
+    function applyFilter() {
+        const startedAt =
+            performance.now();
+
+        clearFilter();
+
+        const records =
+            offerRecords();
+
+        let visible = 0;
+        let low = 0;
+        let sponsored = 0;
+        let unknown = 0;
+
+        for (
+            const record of records
+        ) {
+            if (
+                record.sponsored &&
+                state.hideSponsored
+            ) {
+                record.container
+                    .classList
+                    .add(
+                        CLS.hiddenSponsored
+                    );
+
+                sponsored++;
+
+                continue;
+            }
+
+            if (
+                record.sales ===
+                null
+            ) {
+                if (
+                    state.hideUnknown
+                ) {
+                    record.container
+                        .classList
+                        .add(
+                            CLS.hiddenUnknown
+                        );
+
+                    unknown++;
+                } else {
+                    visible++;
+                }
+
+                continue;
+            }
+
+            if (
+                record.sales <
+                state.filterMinSales
+            ) {
+                record.container
+                    .classList
+                    .add(
+                        CLS.hiddenSales
+                    );
+
+                low++;
+
+                continue;
+            }
+
+            visible++;
+        }
+
+        lastFilter = {
+            total:
+                records.length,
+
+            visible,
+            low,
+            sponsored,
+            unknown,
+
+            ms:
+                Math.round(
+                    performance.now() -
+                    startedAt
+                )
+        };
+
+        renderFilter();
+    }
+
+    function removeFilter() {
+        clearFilter();
+
+        const amount =
+            getOfferArticles()
+                .length;
+
+        lastFilter = {
+            total:
+                amount,
+
+            visible:
+                amount,
+
+            low: 0,
+            sponsored: 0,
+            unknown: 0,
+            ms: 0
+        };
+
+        renderFilter();
+    }
+
+    function categoryName() {
+        return (
+            document.querySelector(
+                'h1'
+            )?.textContent ||
+            ''
+        ).trim() ||
+        'Nie wykryto';
+    }
+
+    function categoryOfferCount() {
+        const heading =
+            document.querySelector(
+                'h1'
+            );
+
+        const roots =
+            heading?.parentElement
+                ? [
+                    heading.parentElement,
+                    document.body
+                ]
+                : [
+                    document.body
+                ];
+
+        for (
+            const root of roots
+        ) {
+            for (
+                const element of root.querySelectorAll(
+                    'div, span, p'
+                )
+            ) {
+                const match =
+                    norm(
+                        element.textContent
+                    ).match(
+                        /^([\d\s.,]+(?:tys\.?|mln\.?)?\+?)\s*ofert(?:a|y)?$/
+                    );
+
+                if (match) {
+                    const amount =
+                        parseCompact(
+                            match[1]
+                        );
+
+                    if (
+                        amount !==
+                        null
+                    )
+                        return amount;
+                }
+            }
+        }
+
+        return null;
+    }
+
+    function categoryScore(
+        analysis
+    ) {
+        let score = 0;
+
+        if (
+            analysis.count !==
+            null
+        ) {
+            if (
+                analysis.count <=
+                3000
+            )
+                score += 30;
+
+            else if (
+                analysis.count <=
+                6000
+            )
+                score += 26;
+
+            else if (
+                analysis.count <=
+                state.maxCategoryOffers
+            )
+                score += 20;
+
+            else if (
+                analysis.count <=
+                state.maxCategoryOffers *
+                1.5
+            )
+                score += 10;
+        }
+
+        if (
+            analysis.strong >= 10
+        )
+            score += 40;
+
+        else if (
+            analysis.strong >= 7
+        )
+            score += 37;
+
+        else if (
+            analysis.strong >= 5
+        )
+            score += 34;
+
+        else if (
+            analysis.strong >= 3
+        )
+            score += 28;
+
+        else if (
+            analysis.strong === 2
+        )
+            score += 18;
+
+        else if (
+            analysis.strong === 1
+        )
+            score += 9;
+
+        if (
+            analysis.strong >=
+            state.minStrongOffers
+        )
+            score += 15;
+
+        if (
+            analysis.top5 >=
+            state.categoryMinSales *
+            3
+        )
+            score += 10;
+
+        else if (
+            analysis.top5 >=
+            state.categoryMinSales *
+            2
+        )
+            score += 8;
+
+        else if (
+            analysis.top5 >=
+            state.categoryMinSales
+        )
+            score += 4;
+
+        if (
+            analysis.max >=
+            state.categoryMinSales *
+            5
+        )
+            score += 5;
+
+        else if (
+            analysis.max >=
+            state.categoryMinSales *
+            3
+        )
+            score += 4;
+
+        else if (
+            analysis.max >=
+            state.categoryMinSales *
+            2
+        )
+            score += 2;
+
+        return clamp(
+            score,
+            0,
+            100
+        );
+    }
+
+    function categoryVerdict(
+        score
+    ) {
+        if (
+            score >= 85
+        )
+            return {
+                label:
+                    'BANGER',
+
+                cls:
+                    'banger',
+
+                desc:
+                    'Bardzo mocna kategoria.'
+            };
+
+        if (
+            score >= 65
+        )
+            return {
+                label:
+                    'DOBRA',
+
+                cls:
+                    'good',
+
+                desc:
+                    'Kategoria wygląda dobrze.'
+            };
+
+        if (
+            score >= 45
+        )
+            return {
+                label:
+                    'DO SPRAWDZENIA',
+
+                cls:
+                    'medium',
+
+                desc:
+                    'Kategoria wymaga dalszej weryfikacji.'
+            };
+
+        return {
+            label:
+                'SŁABA',
+
+            cls:
+                'bad',
+
+            desc:
+                'Za mało popytu albo za duża konkurencja.'
+        };
+    }
+
+    function analyzeCategory() {
+        const startedAt =
+            performance.now();
+
+        const records =
+            offerRecords();
+
+        const allSales = [];
+        const organicSales = [];
+        const sponsoredSales = [];
+
+        let unknown = 0;
+        let sponsoredCount = 0;
+
+        for (
+            const record of records
+        ) {
+            if (
+                record.sponsored
+            )
+                sponsoredCount++;
+
+            if (
+                record.sales ===
+                null
+            ) {
+                unknown++;
+
+                continue;
+            }
+
+            allSales.push(
+                record.sales
+            );
+
+            (
+                record.sponsored
+                    ? sponsoredSales
+                    : organicSales
+            ).push(
+                record.sales
+            );
+        }
+
+        allSales.sort(
+            (a, b) =>
+                b - a
+        );
+
+        organicSales.sort(
+            (a, b) =>
+                b - a
+        );
+
+        sponsoredSales.sort(
+            (a, b) =>
+                b - a
+        );
+
+        const strong =
+            allSales.filter(
+                value =>
+                    value >=
+                    state.categoryMinSales
+            );
+
+        const result = {
+            name:
+                categoryName(),
+
+            count:
+                categoryOfferCount(),
+
+            detected:
+                records.length,
+
+            withSales:
+                allSales.length,
+
+            organic:
+                organicSales.length,
+
+            promoted:
+                sponsoredSales.length,
+
+            sponsoredCount,
+
+            unknown,
+
+            strong:
+                strong.length,
+
+            strongOrganic:
+                organicSales.filter(
+                    value =>
+                        value >=
+                        state.categoryMinSales
+                ).length,
+
+            strongPromoted:
+                sponsoredSales.filter(
+                    value =>
+                        value >=
+                        state.categoryMinSales
+                ).length,
+
+            max:
+                allSales[0] ||
+                0,
+
+            top5:
+                avg(
+                    allSales.slice(
+                        0,
+                        5
+                    )
+                ),
+
+            ms:
+                Math.round(
+                    performance.now() -
+                    startedAt
+                )
+        };
+
+        result.score =
+            categoryScore(
+                result
+            );
+
+        result.verdict =
+            categoryVerdict(
+                result.score
+            );
+
+        return result;
+    }
+
+    function normalizeGtin(raw) {
+        const digits =
+            String(raw ?? '')
+                .replace(
+                    /\D/g,
+                    ''
+                );
+
+        return [
+            8,
+            12,
+            13,
+            14
+        ].includes(
+            digits.length
+        )
+            ? digits
+            : null;
+    }
+
+    function productGtin() {
+        const sources = [
+            document
+                .documentElement
+                ?.innerHTML ||
+            '',
+
+            document.body
+                ?.innerText ||
+            ''
+        ];
+
+        const patterns = [
+            /["']gtin["']\s*:\s*["'](\d{8}|\d{12,14})["']/gi,
+
+            /["']gtin["']\s*:\s*\[\s*["'](\d{8}|\d{12,14})["']/gi,
+
+            /["']ean["']\s*:\s*["'](\d{8}|\d{12,14})["']/gi,
+
+            /(?:GTIN|EAN)\s*:?\s*(\d{8}|\d{12,14})/gi
+        ];
+
+        for (
+            const source of sources
+        ) {
+            for (
+                const pattern of patterns
+            ) {
+                pattern.lastIndex =
+                    0;
+
+                let match;
+
+                while (
+                    (
+                        match =
+                            pattern.exec(
+                                source
+                            )
+                    ) !== null
+                ) {
+                    const gtin =
+                        normalizeGtin(
+                            match[1]
+                        );
+
+                    if (gtin)
+                        return gtin;
+                }
+            }
+        }
+
+        for (
+            const script of document.querySelectorAll(
+                'script'
+            )
+        ) {
+            const source =
+                script.textContent ||
+                '';
+
+            for (
+                const pattern of patterns
+            ) {
+                pattern.lastIndex =
+                    0;
+
+                const match =
+                    pattern.exec(
+                        source
+                    );
+
+                if (match) {
+                    const gtin =
+                        normalizeGtin(
+                            match[1]
+                        );
+
+                    if (gtin)
+                        return gtin;
+                }
+            }
+        }
+
+        return null;
+    }
+
+    async function copyTextToClipboard(
+        value
+    ) {
+        if (!value)
+            return false;
+
+        try {
+            if (
+                navigator.clipboard &&
+                window.isSecureContext
+            ) {
+                await navigator.clipboard
+                    .writeText(
+                        value
+                    );
+
+                return true;
+            }
+        } catch (error) {
+            console.warn(
+                '[Natan Allegro] Clipboard API niedostępne.',
+                error
+            );
+        }
+
+        try {
+            const textarea =
+                document.createElement(
+                    'textarea'
+                );
+
+            textarea.value =
+                value;
+
+            textarea.setAttribute(
+                'readonly',
+                ''
+            );
+
+            textarea.style.position =
+                'fixed';
+
+            textarea.style.opacity =
+                '0';
+
+            document.body.appendChild(
+                textarea
+            );
+
+            textarea.select();
+
+            const copied =
+                document.execCommand(
+                    'copy'
+                );
+
+            textarea.remove();
+
+            return copied;
+        } catch (error) {
+            console.warn(
+                '[Natan Allegro] Nie udało się skopiować GTIN/EAN.',
+                error
+            );
+
+            return false;
+        }
+    }
+
+    function productBrand() {
+        const element =
+            document.querySelector(
+                '[data-analytics-view-label="brandLink"], [data-analytics-click-label="parameterLink"][data-analytics-click-value="Marka"]'
+            );
+
+        if (
+            element
+                ?.dataset
+                .analyticsViewValue
+        )
+            return element
+                .dataset
+                .analyticsViewValue
+                .trim();
+
+        const candidate = [
+            ...document.querySelectorAll(
+                'div, p, span, td'
+            )
+        ].find(
+            item =>
+                /^marka:\s*/i.test(
+                    (
+                        item.textContent ||
+                        ''
+                    ).trim()
+                )
+        );
+
+        return (
+            (
+                candidate
+                    ?.textContent ||
+                ''
+            )
+                .replace(
+                    /^marka:\s*/i,
+                    ''
+                )
+                .trim() ||
+            'Nie wykryto'
+        );
+    }
+
+    function productTitle() {
+        return (
+            document.querySelector(
+                'h1'
+            )?.textContent ||
+            ''
+        ).trim() ||
+        'Nie wykryto';
+    }
+
+    function productRating() {
+        const element =
+            document.querySelector(
+                '[data-analytics-view-label="productRating"]'
+            );
+
+        const value =
+            Number(
+                element
+                    ?.getAttribute(
+                        'data-analytics-view-custom-rating-value'
+                    )
+            );
+
+        if (
+            Number.isFinite(
+                value
+            )
+        )
+            return value;
+
+        const aria =
+            document.querySelector(
+                '[aria-label^="ocena:"]'
+            )?.getAttribute(
+                'aria-label'
+            ) ||
+            '';
+
+        const match =
+            aria.match(
+                /ocena:\s*([\d,.]+)/i
+            );
+
+        return match
+            ? Number(
+                match[1]
+                    .replace(
+                        ',',
+                        '.'
+                    )
+            )
+            : null;
+    }
+
+    function productReviewCounts() {
+        const element =
+            document.querySelector(
+                '[data-analytics-view-label="productRating"]'
+            );
+
+        const ratingCount =
+            Number(
+                element
+                    ?.getAttribute(
+                        'data-analytics-view-custom-rating-count'
+                    )
+            );
+
+        const text =
+            element?.textContent ||
+            document.body.innerText;
+
+        const ratings =
+            Number.isFinite(
+                ratingCount
+            )
+                ? ratingCount
+                : Number(
+                    (
+                        text.match(
+                            /(\d[\d\s]*)\s+ocen/i
+                        )?.[1] ||
+                        ''
+                    ).replace(
+                        /\s/g,
+                        ''
+                    )
+                ) ||
+                0;
+
+        const reviews =
+            Number(
+                (
+                    text.match(
+                        /(\d[\d\s]*)\s+recenzj/i
+                    )?.[1] ||
+                    ''
+                ).replace(
+                    /\s/g,
+                    ''
+                )
+            ) ||
+            0;
+
+        return {
+            ratings,
+            reviews
+        };
+    }
+
+    function productSales() {
+        const ratingLink =
+            document.querySelector(
+                '[data-analytics-view-label="productRating"]'
+            );
+
+        if (ratingLink) {
+            let current =
+                ratingLink.parentElement;
+
+            for (
+                let level = 0;
+                level < 4 &&
+                current;
+                level++
+            ) {
+                const text =
+                    current.textContent ||
+                    '';
+
+                if (
+                    /(?:osób|osoby|osoba)\s+kupi\w*\s+ostatnio/i.test(
+                        text
+                    )
+                ) {
+                    const sales =
+                        parseSalesText(
+                            text
+                        );
+
+                    if (
+                        sales !==
+                        null
+                    )
+                        return sales;
+                }
+
+                current =
+                    current.parentElement;
+            }
+        }
+
+        for (
+            const element of document.querySelectorAll(
+                'div, span, p'
+            )
+        ) {
+            const text =
+                norm(
+                    element.textContent
+                );
+
+            if (
+                !text.includes(
+                    'ostatnio'
+                ) ||
+                !/(?:osób|osoby|osoba)\s+kupi\w*/.test(
+                    text
+                )
+            )
+                continue;
+
+            const sales =
+                parseSalesText(
+                    text
+                );
+
+            if (
+                sales !==
+                null
+            )
+                return sales;
+        }
+
+        return null;
+    }
+
+    function catalogueOffers() {
+        const link =
+            document.querySelector(
+                'a.other-offers-link-all[href="#inne-oferty-produktu"]'
+            );
+
+        if (!link)
+            return null;
+
+        const match =
+            (
+                link.textContent ||
+                ''
+            ).match(
+                /wszystkie\s+oferty\s*\((\d[\d\s]*)\)/i
+            );
+
+        if (!match)
+            return null;
+
+        const value =
+            Number(
+                match[1]
+                    .replace(
+                        /\s/g,
+                        ''
+                    )
+            );
+
+        return Number.isFinite(
+            value
+        )
+            ? value
+            : null;
+    }
+
+    function officialShopInfo() {
+        let label = '';
+
+        for (
+            const element of document.querySelectorAll(
+                'div, p, span'
+            )
+        ) {
+            const text =
+                (
+                    element.textContent ||
+                    ''
+                ).trim();
+
+            if (
+                /^od\s+oficjalny sklep/i.test(
+                    text
+                )
+            ) {
+                label =
+                    text;
+
+                break;
+            }
+        }
+
+        const logo =
+            document.querySelector(
+                'img[alt*="logo oficjalnego sklepu" i]'
+            );
+
+        if (
+            !label &&
+            logo
+        )
+            label =
+                logo.getAttribute(
+                    'alt'
+                ) ||
+                '';
+
+        const shop =
+            label
+                .replace(
+                    /^od\s+oficjalny sklep\s*/i,
+                    ''
+                )
+                .replace(
+                    /^logo oficjalnego sklepu\s*/i,
+                    ''
+                )
+                .trim();
+
+        return {
+            official:
+                Boolean(
+                    label ||
+                    logo
+                ),
+
+            shop:
+                shop ||
+                'Nie wykryto'
+        };
+    }
+
+    function sameBrandShop(
+        brand,
+        shop
+    ) {
+        const clean =
+            value =>
+                norm(value)
+                    .replace(
+                        /[^a-z0-9ąćęłńóśźż]/g,
+                        ''
+                    );
+
+        const first =
+            clean(brand);
+
+        const second =
+            clean(shop);
+
+        return Boolean(
+            first &&
+            second &&
+            (
+                first === second ||
+                first.includes(
+                    second
+                ) ||
+                second.includes(
+                    first
+                )
+            )
+        );
+    }
+
+    function productPrice() {
+        const candidates = [
+            document.querySelector(
+                '[data-analytics-interaction-custom-price]'
+            )?.getAttribute(
+                'data-analytics-interaction-custom-price'
+            ),
+
+            document.querySelector(
+                '[data-analytics-view-label="price"]'
+            )?.textContent
+        ];
+
+        for (
+            const raw of candidates
+        ) {
+            if (!raw)
+                continue;
+
+            const direct =
+                Number(
+                    String(raw)
+                        .replace(
+                            ',',
+                            '.'
+                        )
+                );
+
+            if (
+                Number.isFinite(
+                    direct
+                ) &&
+                direct > 0
+            )
+                return direct;
+
+            const match =
+                String(raw)
+                    .match(
+                        /(\d[\d\s]*)[,.]([0-9]{2})\s*zł/i
+                    );
+
+            if (match)
+                return Number(
+                    match[1]
+                        .replace(
+                            /\s/g,
+                            ''
+                        ) +
+                    '.' +
+                    match[2]
+                );
+        }
+
+        const matches = [
+            ...(
+                document.body.innerText ||
+                ''
+            ).matchAll(
+                /(\d[\d\s]*)[,.]([0-9]{2})\s*zł/g
+            )
+        ]
+            .map(
+                match =>
+                    Number(
+                        match[1]
+                            .replace(
+                                /\s/g,
+                                ''
+                            ) +
+                        '.' +
+                        match[2]
+                    )
+            )
+            .filter(
+                value =>
+                    value > 1
+            );
+
+        return matches.length
+            ? matches[0]
+            : null;
+    }
+
+    function roundUp89(price) {
+        let candidate =
+            Math.floor(
+                price / 10
+            ) *
+            10 +
+            9.89;
+
+        if (
+            candidate < price
+        )
+            candidate += 10;
+
+        return (
+            Math.round(
+                candidate *
+                100
+            ) /
+            100
+        );
+    }
+
+    function smartProfitRule(
+        purchase
+    ) {
+        let percent;
+
+        if (
+            purchase <= 200
+        )
+            percent = 25;
+
+        else if (
+            purchase <= 400
+        )
+            percent = 22.5;
+
+        else if (
+            purchase <= 500
+        )
+            percent = 20;
+
+        else if (
+            purchase <= 750
+        )
+            percent = 18;
+
+        else if (
+            purchase <= 1000
+        )
+            percent = 16;
+
+        else if (
+            purchase <= 1500
+        )
+            percent = 14;
+
+        else
+            percent = 12;
+
+        const calculated =
+            purchase *
+            percent /
+            100;
+
+        const targetNet =
+            Math.max(
+                30,
+                calculated
+            );
+
+        return {
+            percent,
+
+            targetNet:
+                Math.round(
+                    targetNet *
+                    100
+                ) /
+                100,
+
+            minimumApplied:
+                calculated < 30
+        };
+    }
+
+    function targetNetProfit(
+        purchase
+    ) {
+        if (
+            state.profitMode ===
+            'custom'
+        ) {
+            return {
+                percent:
+                    null,
+
+                targetNet:
+                    state.profitCustom,
+
+                minimumApplied:
+                    false
+            };
+        }
+
+        return smartProfitRule(
+            purchase
+        );
+    }
+
+    function pricing(
+        purchase
+    ) {
+        if (
+            !Number.isFinite(
+                purchase
+            )
+        )
+            return null;
+
+        const commission =
+            0.12;
+
+        const tax =
+            0.19;
+
+        const profitRule =
+            targetNetProfit(
+                purchase
+            );
+
+        const targetNet =
+            profitRule.targetNet;
+
+        const profitBeforeTax =
+            targetNet /
+            (1 - tax);
+
+        const minimum =
+            (
+                purchase +
+                profitBeforeTax
+            ) /
+            (1 -
+                commission);
+
+        const suggested =
+            roundUp89(
+                minimum
+            );
+
+        const commissionValue =
+            suggested *
+            commission;
+
+        const grossProfitBeforeTax =
+            suggested -
+            commissionValue -
+            purchase;
+
+        const incomeTax =
+            Math.max(
+                0,
+                grossProfitBeforeTax *
+                tax
+            );
+
+        const netProfit =
+            grossProfitBeforeTax -
+            incomeTax;
+
+        return {
+            purchase,
+            commission,
+            tax,
+            targetNet,
+            minimum,
+            suggested,
+            commissionValue,
+
+            profitBeforeTax:
+                grossProfitBeforeTax,
+
+            incomeTax,
+            netProfit,
+
+            profitMode:
+                state.profitMode,
+
+            profitPercent:
+                profitRule.percent,
+
+            profitCustom:
+                state.profitCustom,
+
+            minimumProfitApplied:
+                profitRule.minimumApplied
+        };
+    }
+
+    function productScore(
+        analysis
+    ) {
+        if (
+            analysis.sales ===
+                null ||
+            analysis.sales <
+                state.finderMinSales
+        )
+            return 0;
+
+        if (
+            analysis.price !==
+                null &&
+            analysis.price >
+                state.finderMaxPrice
+        )
+            return 0;
+
+        if (
+            blockedBrandMatch(
+                analysis.brand
+            )
+        )
+            return 0;
+
+        if (
+            analysis.official &&
+            analysis.brandMatchesShop &&
+            (analysis.offers ?? 0) <
+                8
+        )
+            return 0;
+
+        let score = 0;
+
+        if (
+            analysis.sales >= 500
+        )
+            score += 40;
+
+        else if (
+            analysis.sales >= 300
+        )
+            score += 35;
+
+        else if (
+            analysis.sales >= 200
+        )
+            score += 31;
+
+        else
+            score += 27;
+
+        if (
+            analysis.rating !==
+            null
+        ) {
+            if (
+                analysis.rating >=
+                4.95
+            )
+                score += 15;
+
+            else if (
+                analysis.rating >=
+                4.9
+            )
+                score += 13;
+
+            else if (
+                analysis.rating >=
+                4.8
+            )
+                score += 10;
+
+            else if (
+                analysis.rating >=
+                4.7
+            )
+                score += 6;
+        }
+
+        if (
+            analysis.ratings >= 500
+        )
+            score += 15;
+
+        else if (
+            analysis.ratings >= 250
+        )
+            score += 13;
+
+        else if (
+            analysis.ratings >= 100
+        )
+            score += 10;
+
+        else if (
+            analysis.ratings >= 50
+        )
+            score += 7;
+
+        else if (
+            analysis.ratings >= 20
+        )
+            score += 4;
+
+        if (
+            analysis.reviews >= 100
+        )
+            score += 10;
+
+        else if (
+            analysis.reviews >= 50
+        )
+            score += 8;
+
+        else if (
+            analysis.reviews >= 20
+        )
+            score += 6;
+
+        else if (
+            analysis.reviews >= 10
+        )
+            score += 4;
+
+        if (
+            analysis.offers !==
+            null
+        ) {
+            if (
+                analysis.offers >=
+                    20 &&
+                analysis.offers <=
+                    60
+            )
+                score += 15;
+
+            else if (
+                analysis.offers >=
+                    9 &&
+                analysis.offers <
+                    20
+            )
+                score += 12;
+
+            else if (
+                analysis.offers >
+                    60 &&
+                analysis.offers <=
+                    120
+            )
+                score += 10;
+
+            else if (
+                analysis.offers >=
+                8
+            )
+                score += 7;
+        }
+
+        return clamp(
+            score,
+            0,
+            100
+        );
+    }
+
+    function productVerdict(
+        analysis
+    ) {
+        if (
+            analysis.sales ===
+            null
+        )
+            return {
+                label:
+                    'BRAK DANYCH',
+
+                cls:
+                    'medium',
+
+                desc:
+                    'Nie wykryto sprzedaży produktu.'
+            };
+
+        if (
+            analysis.price !==
+                null &&
+            analysis.price >
+                state.finderMaxPrice
+        )
+            return {
+                label:
+                    'ODRZUĆ',
+
+                cls:
+                    'bad',
+
+                desc:
+                    `Cena ${fmt(
+                        analysis.price,
+                        2
+                    )} zł przekracza limit Product Findera ${fmt(
+                        state.finderMaxPrice,
+                        0
+                    )} zł.`
+            };
+
+        const blocked =
+            blockedBrandMatch(
+                analysis.brand
+            );
+
+        if (blocked)
+            return {
+                label:
+                    'ODRZUĆ',
+
+                cls:
+                    'bad',
+
+                desc:
+                    `Marka „${blocked}” znajduje się na blacklistcie Product Findera.`
+            };
+
+        if (
+            analysis.sales <
+            state.finderMinSales
+        )
+            return {
+                label:
+                    'ODRZUĆ',
+
+                cls:
+                    'bad',
+
+                desc:
+                    `Sprzedaż produktu wynosi ${analysis.sales}; wymagane minimum to ${state.finderMinSales}.`
+            };
+
+        if (
+            analysis.official &&
+            analysis.brandMatchesShop &&
+            (analysis.offers ?? 0) <
+                8
+        )
+            return {
+                label:
+                    'ODRZUĆ',
+
+                cls:
+                    'bad',
+
+                desc:
+                    'Oficjalny sklep tej samej marki i mniej niż 8 ofert w katalogu.'
+            };
+
+        if (
+            analysis.score >= 85
+        )
+            return {
+                label:
+                    'BANGER',
+
+                cls:
+                    'banger',
+
+                desc:
+                    'Bardzo mocny produkt.'
+            };
+
+        if (
+            analysis.score >= 65
+        )
+            return {
+                label:
+                    'DOBRY',
+
+                cls:
+                    'good',
+
+                desc:
+                    'Produkt wygląda dobrze.'
+            };
+
+        if (
+            analysis.score >= 45
+        )
+            return {
+                label:
+                    'ŚREDNI',
+
+                cls:
+                    'medium',
+
+                desc:
+                    'Prawdopodobnie mały popyt.'
+            };
+
+        return {
+            label:
+                'ODRZUĆ',
+
+            cls:
+                'bad',
+
+            desc:
+                'Produkt nie uzyskał wystarczającej oceny.'
+        };
+    }
+
+    function analyzeProduct() {
+        const startedAt =
+            performance.now();
+
+        const brand =
+            productBrand();
+
+        const officialInfo =
+            officialShopInfo();
+
+        const counts =
+            productReviewCounts();
+
+        const result = {
+            title:
+                productTitle(),
+
+            brand,
+
+            official:
+                officialInfo.official,
+
+            shop:
+                officialInfo.shop,
+
+            brandMatchesShop:
+                sameBrandShop(
+                    brand,
+                    officialInfo.shop
+                ),
+
+            offers:
+                catalogueOffers(),
+
+            sales:
+                productSales(),
+
+            rating:
+                productRating(),
+
+            ratings:
+                counts.ratings,
+
+            reviews:
+                counts.reviews,
+
+            gtin:
+                productGtin(),
+
+            price:
+                productPrice(),
+
+            productId:
+                currentProductId(),
+
+            offerId:
+                currentOfferId(),
+
+            url:
+                canonicalOfferUrl(),
+
+            category:
+                productCategoryContext(),
+
+            ms: 0
+        };
+
+        result.pricing =
+            pricing(
+                result.price
+            );
+
+        result.score =
+            productScore(
+                result
+            );
+
+        result.verdict =
+            productVerdict(
+                result
+            );
+
+        result.ms =
+            Math.round(
+                performance.now() -
+                startedAt
+            );
+
+        return result;
+    }
+
+    function runCategory() {
+        const button =
+            document.getElementById(
+                'natan-category-run'
+            );
+
+        button.disabled =
+            true;
+
+        button.textContent =
+            'Analizowanie...';
+
+        requestAnimationFrame(
+            () => {
+                lastCategory =
+                    analyzeCategory();
+
+                renderCategory();
+
+                renderAdvanced();
+
+                button.disabled =
+                    false;
+
+                button.textContent =
+                    'Analizuj kategorię';
+            }
+        );
+    }
+
+    function runProduct() {
+        const button =
+            document.getElementById(
+                'natan-product-run'
+            );
+
+        button.disabled =
+            true;
+
+        button.textContent =
+            'Analizowanie...';
+
+        requestAnimationFrame(
+            async () => {
+                lastProduct =
+                    analyzeProduct();
+
+                renderProduct();
+
+                if (
+                    lastProduct.gtin
+                ) {
+                    lastProduct.gtinCopied =
+                        await copyTextToClipboard(
+                            lastProduct.gtin
+                        );
+                } else {
+                    lastProduct.gtinCopied =
+                        false;
+                }
+
+                if (
+                    state.finderAutoSave
+                ) {
+                    try {
+                        lastProduct.finderRecord =
+                            await finderSaveAnalysis(
+                                lastProduct
+                            );
+
+                        lastProduct.finderSaved =
+                            true;
+
+                        await renderFinderDatabase();
+                    } catch (error) {
+                        console.error(
+                            '[Natan Allegro] Błąd zapisu Product Finder.',
+                            error
+                        );
+
+                        lastProduct.finderSaved =
+                            false;
+                    }
+                }
+
+                renderProduct();
+
+                button.disabled =
+                    false;
+
+                button.textContent =
+                    'Analizuj produkt';
+            }
+        );
+    }
+
+    function addStyles() {
+        if (
+            document.getElementById(
+                'natan-v63-style'
+            )
+        )
+            return;
+
+        const style =
+            document.createElement(
+                'style'
+            );
+
+        style.id =
+            'natan-v63-style';
+
+        style.textContent = `
+.${CLS.hiddenSales},
+.${CLS.hiddenSponsored},
+.${CLS.hiddenUnknown}{
+    display:none!important
+}
+
+#natan-panel-v63{
+    position:fixed;
+    right:18px;
+    bottom:18px;
+    z-index:2147483647;
+    width:350px;
+    max-height:calc(100vh - 36px);
+    overflow:auto;
+    padding:13px;
+    color:#fff;
+    background:rgba(20,20,20,.97);
+    border:1px solid rgba(255,255,255,.18);
+    border-radius:11px;
+    box-shadow:0 10px 35px rgba(0,0,0,.55);
+    font-family:Arial,sans-serif;
+    font-size:13px;
+    line-height:1.35
+}
+
+#natan-panel-v63 *{
+    box-sizing:border-box
+}
+
+#natan-panel-v63.collapsed{
+    width:auto;
+    min-width:235px
+}
+
+#natan-panel-v63.collapsed .body{
+    display:none
+}
+
+.hdr,
+.row{
+    display:flex;
+    align-items:center;
+    justify-content:space-between;
+    gap:10px
+}
+
+.hdr{
+    font-weight:700
+}
+
+.row{
+    margin:8px 0
+}
+
+.collapse{
+    width:29px;
+    height:27px;
+    border:1px solid #555;
+    border-radius:6px;
+    color:#fff;
+    background:#333;
+    cursor:pointer
+}
+
+.tabs{
+    display:grid;
+    grid-template-columns:repeat(5,1fr);
+    gap:5px;
+    margin:11px 0 12px
+}
+
+.tab{
+    height:34px;
+    border:1px solid #444;
+    border-radius:7px;
+    color:#ccc;
+    background:#2b2b2b;
+    cursor:pointer;
+    font-size:11px;
+    font-weight:700
+}
+
+.tab.active{
+    color:#fff;
+    background:#ff5a00;
+    border-color:#ff5a00
+}
+
+.pane{
+    display:none
+}
+
+.pane.active{
+    display:block
+}
+
+.title{
+    margin-bottom:9px;
+    color:#ff7a2f;
+    font-weight:700
+}
+
+.num,
+.select{
+    width:110px;
+    height:31px;
+    padding:4px 7px;
+    border:1px solid #555;
+    border-radius:6px;
+    color:#fff;
+    background:#292929;
+    font-weight:700;
+    text-align:center
+}
+
+.select{
+    text-align:left
+}
+
+.range{
+    width:100%;
+    accent-color:#ff5a00
+}
+
+.scale{
+    display:flex;
+    justify-content:space-between;
+    color:#999;
+    font-size:11px
+}
+
+.check{
+    width:17px;
+    height:17px;
+    accent-color:#ff5a00
+}
+
+.btn{
+    width:100%;
+    min-height:34px;
+    margin-top:9px;
+    padding:7px 9px;
+    border:0;
+    border-radius:7px;
+    color:#fff;
+    background:#3a3a3a;
+    cursor:pointer;
+    font-weight:700
+}
+
+.btn.primary{
+    background:#ff5a00
+}
+
+.btn:disabled{
+    opacity:.65;
+    cursor:wait
+}
+
+.placeholder{
+    padding:14px;
+    border:1px dashed #555;
+    border-radius:8px;
+    color:#aaa;
+    text-align:center
+}
+
+.card{
+    margin-top:10px;
+    padding:11px;
+    border:1px solid #444;
+    border-radius:8px;
+    background:#272727
+}
+
+.summary{
+    display:grid;
+    grid-template-columns:minmax(0,1fr) auto;
+    gap:6px 10px
+}
+
+.summary strong{
+    text-align:right
+}
+
+.verdict{
+    margin-top:11px;
+    padding:15px 12px;
+    border-radius:9px;
+    text-align:center
+}
+
+.verdict.banger{
+    border:2px solid #24ce55;
+    background:rgba(36,206,85,.12)
+}
+
+.verdict.good{
+    border:2px solid #70c756;
+    background:rgba(112,199,86,.12)
+}
+
+.verdict.medium{
+    border:2px solid #e3b63e;
+    background:rgba(227,182,62,.12)
+}
+
+.verdict.bad{
+    border:2px solid #e05252;
+    background:rgba(224,82,82,.12)
+}
+
+.vlabel{
+    font-size:23px;
+    font-weight:900
+}
+
+.score{
+    font-size:17px;
+    font-weight:700
+}
+
+.desc{
+    margin-top:8px;
+    color:#d0d0d0;
+    font-size:12px
+}
+
+.note{
+    margin-top:9px;
+    color:#aaa;
+    font-size:11px
+}
+
+.filterSummary{
+    margin-top:10px;
+    padding:9px;
+    border-radius:7px;
+    background:#292929;
+    color:#ccc;
+    font-size:12px
+}
+
+.price{
+    color:#75e68b;
+    font-size:18px
+}
+
+.danger{
+    color:#ff7979
+}
+
+.profit-custom.hidden,
+.profit-percent.hidden{
+    display:none
+}
+
+.ean-bar{
+    display:flex;
+    align-items:center;
+    justify-content:space-between;
+    gap:10px;
+    margin-top:10px;
+    padding:10px 11px;
+    border:1px solid #555;
+    border-radius:8px;
+    background:#1f1f1f
+}
+
+.ean-bar .ean-label{
+    color:#aaa;
+    font-size:11px;
+    font-weight:700;
+    text-transform:uppercase;
+    letter-spacing:.4px
+}
+
+.ean-bar .ean-value{
+    font-family:Consolas,monospace;
+    font-size:16px;
+    font-weight:900;
+    letter-spacing:.5px;
+    color:#fff;
+    user-select:all
+}
+
+.ean-bar .ean-status{
+    font-size:11px;
+    color:#75e68b;
+    white-space:nowrap
+}
+
+.ean-bar.missing .ean-status{
+    color:#ff7979
+}
+
+#natan-panel-v63.finder-active{
+    width:min(920px,calc(100vw - 36px))
+}
+
+.finder-grid{
+    display:grid;
+    grid-template-columns:repeat(3,minmax(0,1fr));
+    gap:7px;
+    margin-top:9px
+}
+
+.finder-field{
+    display:flex;
+    flex-direction:column;
+    gap:4px
+}
+
+.finder-field label{
+    color:#aaa;
+    font-size:11px;
+    font-weight:700
+}
+
+.finder-field .select,
+.finder-field .num,
+.finder-search{
+    width:100%;
+    height:32px
+}
+
+.finder-search{
+    padding:6px 8px;
+    border:1px solid #555;
+    border-radius:6px;
+    color:#fff;
+    background:#292929
+}
+
+.finder-textarea{
+    width:100%;
+    min-height:64px;
+    padding:7px;
+    border:1px solid #555;
+    border-radius:6px;
+    color:#fff;
+    background:#292929;
+    resize:vertical;
+    font-family:Arial,sans-serif
+}
+
+.finder-actions{
+    display:grid;
+    grid-template-columns:repeat(4,1fr);
+    gap:7px;
+    margin-top:9px
+}
+
+.finder-actions .btn{
+    margin-top:0;
+    font-size:11px
+}
+
+.finder-stats{
+    display:grid;
+    grid-template-columns:repeat(6,1fr);
+    gap:6px;
+    margin-top:10px
+}
+
+.finder-stat{
+    padding:8px;
+    border:1px solid #444;
+    border-radius:7px;
+    background:#222;
+    text-align:center
+}
+
+.finder-stat span{
+    display:block;
+    color:#aaa;
+    font-size:10px
+}
+
+.finder-stat strong{
+    display:block;
+    margin-top:2px;
+    font-size:15px
+}
+
+.finder-table-wrap{
+    margin-top:10px;
+    overflow:auto;
+    border:1px solid #444;
+    border-radius:8px
+}
+
+.finder-table{
+    width:100%;
+    min-width:820px;
+    border-collapse:collapse;
+    background:#222;
+    font-size:11px
+}
+
+.finder-table th,
+.finder-table td{
+    padding:7px 8px;
+    border-bottom:1px solid #3b3b3b;
+    vertical-align:top
+}
+
+.finder-table th{
+    position:sticky;
+    top:0;
+    z-index:1;
+    background:#303030;
+    color:#bbb;
+    text-align:left
+}
+
+.finder-table tr:last-child td{
+    border-bottom:0
+}
+
+.finder-num{
+    white-space:nowrap;
+    text-align:right
+}
+
+.finder-product{
+    min-width:230px
+}
+
+.finder-product strong{
+    display:block;
+    color:#fff
+}
+
+.finder-product small,
+.finder-date small{
+    display:block;
+    margin-top:3px;
+    color:#999
+}
+
+.finder-date{
+    white-space:nowrap
+}
+
+.finder-badge{
+    display:inline-block;
+    padding:3px 6px;
+    border-radius:999px;
+    font-size:10px;
+    font-weight:800;
+    white-space:nowrap
+}
+
+.finder-badge.accepted{
+    background:rgba(36,206,85,.16);
+    color:#75e68b
+}
+
+.finder-badge.maybe{
+    background:rgba(227,182,62,.16);
+    color:#f0cc65
+}
+
+.finder-badge.rejected{
+    background:rgba(224,82,82,.16);
+    color:#ff8989
+}
+
+.finder-badge.skipped{
+    background:rgba(160,160,160,.14);
+    color:#bbb
+}
+
+.finder-link{
+    display:inline-block;
+    padding:5px 7px;
+    border-radius:5px;
+    background:#ff5a00;
+    color:#fff!important;
+    font-weight:800;
+    text-decoration:none!important
+}
+
+.finder-subtabs{
+    display:grid;
+    grid-template-columns:1fr 1fr;
+    gap:7px;
+    margin:2px 0 12px
+}
+
+.finder-subtab{
+    height:38px;
+    border:1px solid #4a4a4a;
+    border-radius:8px;
+    background:#262626;
+    color:#bbb;
+    font-weight:900;
+    cursor:pointer
+}
+
+.finder-subtab.active{
+    background:#ff5a00;
+    border-color:#ff5a00;
+    color:#fff
+}
+
+.finder-view{
+    display:none
+}
+
+.finder-view.active{
+    display:block
+}
+
+.finder-run-head{
+    display:flex;
+    align-items:center;
+    justify-content:space-between;
+    gap:12px
+}
+
+.finder-run-buttons{
+    display:grid;
+    grid-template-columns:repeat(3,1fr);
+    gap:7px;
+    min-width:360px
+}
+
+.finder-run-buttons .btn{
+    margin:0
+}
+
+.danger-btn{
+    background:#8d3030!important
+}
+
+.finder-run-status{
+    display:inline-block;
+    margin-top:3px;
+    padding:5px 8px;
+    border-radius:999px;
+    background:#333;
+    font-size:11px;
+    font-weight:900
+}
+
+.finder-run-status.running{
+    color:#75e68b
+}
+
+.finder-run-status.paused{
+    color:#f0cc65
+}
+
+.finder-run-status.finished{
+    color:#75e68b
+}
+
+.finder-run-status.error,
+.finder-run-status.stopped{
+    color:#ff8989
+}
+
+.finder-log{
+    margin-top:10px;
+    padding:9px;
+    border-radius:7px;
+    background:#1f1f1f;
+    color:#cfcfcf;
+    font-family:Consolas,monospace;
+    font-size:11px;
+    word-break:break-word
+}
+
+@media(max-width:760px){
+    #natan-panel-v63.finder-active{
+        left:10px;
+        right:10px;
+        width:auto
+    }
+
+    .finder-grid{
+        grid-template-columns:1fr
+    }
+
+    .finder-stats{
+        grid-template-columns:repeat(2,1fr)
+    }
+
+    .finder-actions{
+        grid-template-columns:repeat(2,1fr)
+    }
+}
+`;
+
+        document.documentElement.appendChild(
+            style
+        );
+    }
+
+    function createPanel() {
+        if (
+            !document.body ||
+            document.getElementById(
+                'natan-panel-v63'
+            )
+        )
+            return;
+
+        const panel =
+            document.createElement(
+                'div'
+            );
+
+        panel.id =
+            'natan-panel-v63';
+
+        panel.classList.toggle(
+            'collapsed',
+            state.collapsed
+        );
+
+        panel.innerHTML = `
+<div class="hdr">
+    <span>Allegro – skaner v6.5.0</span>
+
+    <button
+        id="natan-collapse"
+        class="collapse"
+    >
+        ${state.collapsed ? '+' : '—'}
+    </button>
+</div>
+
+<div class="body">
+
+<div class="tabs">
+    <button class="tab" data-tab="category">Kategoria</button>
+    <button class="tab" data-tab="product">Produkt</button>
+    <button class="tab" data-tab="filter">Filtr</button>
+    <button class="tab" data-tab="advanced">Więcej</button>
+    <button class="tab" data-tab="finder">Finder</button>
+</div>
+
+<section
+    id="pane-category"
+    class="pane"
+>
+    <div class="title">
+        Analiza kategorii
+    </div>
+
+    <div class="row">
+        <label>
+            Próg sprzedaży:
+        </label>
+
+        <input
+            id="category-min"
+            class="num"
+            type="number"
+            min="1"
+            max="9999"
+            value="${state.categoryMinSales}"
+        >
+    </div>
+
+    <div class="row">
+        <label>
+            Maks. ofert:
+        </label>
+
+        <input
+            id="category-max"
+            class="num"
+            type="number"
+            min="100"
+            max="999999"
+            value="${state.maxCategoryOffers}"
+        >
+    </div>
+
+    <div class="row">
+        <label>
+            Min. mocnych:
+        </label>
+
+        <input
+            id="category-strong"
+            class="num"
+            type="number"
+            min="1"
+            max="100"
+            value="${state.minStrongOffers}"
+        >
+    </div>
+
+    <button
+        id="natan-category-run"
+        class="btn primary"
+    >
+        Analizuj kategorię
+    </button>
+
+    <div id="category-result">
+        <div class="placeholder">
+            Kliknij „Analizuj kategorię”.
+        </div>
+    </div>
+</section>
+
+<section
+    id="pane-product"
+    class="pane"
+>
+    <div class="title">
+        Analiza produktu
+    </div>
+
+    <div class="note">
+        Sprzedaż poniżej progu Product Findera = odrzucenie.
+        Cena powyżej limitu Findera lub marka z blacklisty = odrzucenie.
+        Oficjalny sklep tej samej marki i mniej niż 8 ofert = odrzucenie.
+    </div>
+
+    <div class="card">
+        <div class="title">
+            Kalkulator zysku
+        </div>
+
+        <div class="row">
+            <label>
+                Tryb:
+            </label>
+
+            <select
+                id="profit-mode"
+                class="select"
+            >
+                <option
+                    value="percent"
+                    ${
+                        state.profitMode ===
+                        'percent'
+                            ? 'selected'
+                            : ''
+                    }
+                >
+                    Adaptacyjny SMART
+                </option>
+
+                <option
+                    value="custom"
+                    ${
+                        state.profitMode ===
+                        'custom'
+                            ? 'selected'
+                            : ''
+                    }
+                >
+                    Custom zł
+                </option>
+            </select>
+        </div>
+
+        <div
+            class="row profit-percent ${
+                state.profitMode ===
+                'percent'
+                    ? ''
+                    : 'hidden'
+            }"
+        >
+            <span>
+                SMART dobiera próg automatycznie
+            </span>
+
+            <strong>
+                min. 30 zł
+            </strong>
+        </div>
+
+        <div
+            class="row profit-custom ${
+                state.profitMode ===
+                'custom'
+                    ? ''
+                    : 'hidden'
+            }"
+        >
+            <label>
+                Zysk netto:
+            </label>
+
+            <input
+                id="profit-custom"
+                class="num"
+                type="number"
+                min="0"
+                max="10000"
+                step="1"
+                value="${state.profitCustom}"
+            >
+
+            <strong>
+                zł
+            </strong>
+        </div>
+
+        <div class="note">
+            SMART: do 200 zł → 25%; 200–400 → 22,5%;
+            400–500 → 20%; 500–750 → 18%;
+            750–1000 → 16%; 1000–1500 → 14%;
+            powyżej 1500 → 12%.
+            Zysk netto nigdy nie spada poniżej 30 zł.
+        </div>
+    </div>
+
+    <button
+        id="natan-product-run"
+        class="btn primary"
+    >
+        Analizuj produkt
+    </button>
+
+    <div id="product-result">
+        <div class="placeholder">
+            Otwórz stronę produktu i kliknij „Analizuj produkt”.
+        </div>
+    </div>
+</section>
+
+<section
+    id="pane-filter"
+    class="pane"
+>
+    <div class="title">
+        Filtr ofert
+    </div>
+
+    <div class="row">
+        <label>
+            Pokazuj od:
+        </label>
+
+        <input
+            id="filter-num"
+            class="num"
+            type="number"
+            min="0"
+            max="999"
+            value="${state.filterMinSales}"
+        >
+    </div>
+
+    <input
+        id="filter-range"
+        class="range"
+        type="range"
+        min="0"
+        max="999"
+        value="${state.filterMinSales}"
+    >
+
+    <div class="scale">
+        <span>0</span>
+        <span>999</span>
+    </div>
+
+    <div class="row">
+        <label>
+            Ukrywaj sponsorowane:
+        </label>
+
+        <input
+            id="hide-sponsored"
+            class="check"
+            type="checkbox"
+            ${
+                state.hideSponsored
+                    ? 'checked'
+                    : ''
+            }
+        >
+    </div>
+
+    <div class="row">
+        <label>
+            Ukrywaj bez sprzedaży:
+        </label>
+
+        <input
+            id="hide-unknown"
+            class="check"
+            type="checkbox"
+            ${
+                state.hideUnknown
+                    ? 'checked'
+                    : ''
+            }
+        >
+    </div>
+
+    <button
+        id="apply-filter"
+        class="btn primary"
+    >
+        Zastosuj filtr
+    </button>
+
+    <button
+        id="remove-filter"
+        class="btn"
+    >
+        Pokaż wszystkie
+    </button>
+
+    <div
+        id="filter-result"
+        class="filterSummary"
+    >
+        Filtr nie został uruchomiony.
+    </div>
+</section>
+
+<section
+    id="pane-advanced"
+    class="pane"
+>
+    <div class="title">
+        Dane zaawansowane
+    </div>
+
+    <div id="advanced-result">
+        <div class="placeholder">
+            Szczegóły pojawią się po analizie kategorii.
+        </div>
+    </div>
+
+    <button
+        id="reset-settings"
+        class="btn"
+    >
+        Przywróć ustawienia domyślne
+    </button>
+</section>
+
+<section
+    id="pane-finder"
+    class="pane"
+>
+    <div class="finder-subtabs">
+        <button
+            class="finder-subtab"
+            data-finder-view="finder"
+        >
+            FINDER
+        </button>
+
+        <button
+            class="finder-subtab"
+            data-finder-view="database"
+        >
+            BAZA DANYCH
+        </button>
+    </div>
+
+    <div
+        id="finder-view-finder"
+        class="finder-view"
+    >
+        <div class="title">
+            Product Finder — automat
+        </div>
+
+        <div class="note">
+            START uruchamia automatyczne przechodzenie po ofertach.
+            Tryb „Automatycznie po kategoriach” odkrywa podkategorie
+            z drzewa Allegro; tryb „Tylko obecna kategoria”
+            nie wychodzi poza aktualną kategorię.
+        </div>
+
+        <div class="card">
+
+            <div class="finder-run-head">
+                <div>
+                    <div
+                        class="title"
+                        style="margin-bottom:2px"
+                    >
+                        Sterowanie
+                    </div>
+
+                    <div
+                        id="finder-auto-status"
+                        class="finder-run-status"
+                    >
+                        ⚪ GOTOWY
+                    </div>
+                </div>
+
+                <div class="finder-run-buttons">
+                    <button
+                        id="finder-start"
+                        class="btn primary"
+                    >
+                        ▶ START
+                    </button>
+
+                    <button
+                        id="finder-pause"
+                        class="btn"
+                    >
+                        ⏸ PAUZA
+                    </button>
+
+                    <button
+                        id="finder-stop"
+                        class="btn danger-btn"
+                    >
+                        ■ STOP
+                    </button>
+                </div>
+            </div>
+
+            <div class="finder-grid">
+
+                <div class="finder-field">
+                    <label>
+                        Tryb
+                    </label>
+
+                    <select
+                        id="finder-mode"
+                        class="select"
+                    >
+                        <option
+                            value="auto"
+                            ${
+                                state.finderMode ===
+                                'auto'
+                                    ? 'selected'
+                                    : ''
+                            }
+                        >
+                            Automatycznie po kategoriach
+                        </option>
+
+                        <option
+                            value="current"
+                            ${
+                                state.finderMode ===
+                                'current'
+                                    ? 'selected'
+                                    : ''
+                            }
+                        >
+                            Tylko obecna kategoria
+                        </option>
+                    </select>
+                </div>
+
+                <div class="finder-field">
+                    <label>
+                        Min. sprzedaż produktu
+                    </label>
+
+                    <input
+                        id="finder-min-sales"
+                        class="num"
+                        type="number"
+                        min="1"
+                        max="9999"
+                        value="${state.finderMinSales}"
+                    >
+                </div>
+
+                <div class="finder-field">
+                    <label>
+                        Maks. stron / kategorię
+                    </label>
+
+                    <input
+                        id="finder-max-pages"
+                        class="num"
+                        type="number"
+                        min="1"
+                        max="100"
+                        value="${state.finderMaxPages}"
+                    >
+                </div>
+
+            </div>
+
+            <div class="row">
+                <label>
+                    Maks. cena produktu:
+                </label>
+
+                <input
+                    id="finder-max-price"
+                    class="num"
+                    type="number"
+                    min="1"
+                    max="100000"
+                    step="1"
+                    value="${state.finderMaxPrice}"
+                >
+
+                <strong>
+                    zł
+                </strong>
+            </div>
+
+            <div class="finder-field">
+                <label>
+                    Blacklista marek — jedna marka w linii lub po przecinku
+                </label>
+
+                <textarea
+                    id="finder-blocked-brands"
+                    class="finder-textarea"
+                >${esc(state.finderBlockedBrands)}</textarea>
+            </div>
+
+            <div
+                class="finder-field"
+                style="margin-top:8px"
+            >
+                <label>
+                    Wykluczone kategorie — Finder nie wchodzi w te gałęzie
+                </label>
+
+                <textarea
+                    id="finder-excluded-categories"
+                    class="finder-textarea"
+                >${esc(state.finderExcludedCategories)}</textarea>
+            </div>
+
+            <div class="row">
+                <label>
+                    Auto-zapis przy ręcznej analizie produktu:
+                </label>
+
+                <input
+                    id="finder-auto-save"
+                    class="check"
+                    type="checkbox"
+                    ${
+                        state.finderAutoSave
+                            ? 'checked'
+                            : ''
+                    }
+                >
+            </div>
+
+            <div class="note">
+                Hard reject produktu:
+                sprzedaż &lt; ${state.finderMinSales},
+                cena &gt; ${state.finderMaxPrice} zł,
+                marka z blacklisty albo oficjalny sklep tej samej marki
+                z mniej niż 8 ofertami katalogowymi.
+                Rozmiar kategorii nie powoduje odrzucenia —
+                wpływa tylko na priorytet i liczbę skanowanych stron.
+            </div>
+        </div>
+
+        <div class="card">
+            <div class="title">
+                Status skanowania
+            </div>
+
+            <div id="finder-auto-details"></div>
+        </div>
+    </div>
+
+    <div
+        id="finder-view-database"
+        class="finder-view"
+    >
+        <div class="title">
+            Product Finder — baza danych
+        </div>
+
+        <div class="note">
+            Pełna pamięć przeanalizowanych produktów
+            z dokładnym Checked At, Product ID, Offer ID,
+            linkiem, sprzedażą, ratingiem, score
+            i powodem decyzji.
+        </div>
+
+        <div class="card">
+            <div class="title">
+                Filtry bazy
+            </div>
+
+            <div class="finder-grid">
+
+                <div class="finder-field">
+                    <label>
+                        Status
+                    </label>
+
+                    <select
+                        id="finder-status"
+                        class="select"
+                    >
+                        <option
+                            value="ALL"
+                            ${
+                                state.finderStatusFilter ===
+                                'ALL'
+                                    ? 'selected'
+                                    : ''
+                            }
+                        >
+                            Wszystkie
+                        </option>
+
+                        <option
+                            value="ACCEPTED"
+                            ${
+                                state.finderStatusFilter ===
+                                'ACCEPTED'
+                                    ? 'selected'
+                                    : ''
+                            }
+                        >
+                            ❤️ Accepted
+                        </option>
+
+                        <option
+                            value="MAYBE"
+                            ${
+                                state.finderStatusFilter ===
+                                'MAYBE'
+                                    ? 'selected'
+                                    : ''
+                            }
+                        >
+                            🟡 Maybe
+                        </option>
+
+                        <option
+                            value="REJECTED"
+                            ${
+                                state.finderStatusFilter ===
+                                'REJECTED'
+                                    ? 'selected'
+                                    : ''
+                            }
+                        >
+                            ❌ Rejected
+                        </option>
+
+                        <option
+                            value="SKIPPED"
+                            ${
+                                state.finderStatusFilter ===
+                                'SKIPPED'
+                                    ? 'selected'
+                                    : ''
+                            }
+                        >
+                            ⏭ Skipped
+                        </option>
+                    </select>
+                </div>
+
+                <div class="finder-field">
+                    <label>
+                        Data
+                    </label>
+
+                    <select
+                        id="finder-date"
+                        class="select"
+                    >
+                        <option
+                            value="today"
+                            ${
+                                state.finderDateFilter ===
+                                'today'
+                                    ? 'selected'
+                                    : ''
+                            }
+                        >
+                            Dzisiaj
+                        </option>
+
+                        <option
+                            value="all"
+                            ${
+                                state.finderDateFilter ===
+                                'all'
+                                    ? 'selected'
+                                    : ''
+                            }
+                        >
+                            Cała baza
+                        </option>
+                    </select>
+                </div>
+
+                <div class="finder-field">
+                    <label>
+                        Sortowanie
+                    </label>
+
+                    <select
+                        id="finder-sort"
+                        class="select"
+                    >
+                        <option
+                            value="score-desc"
+                            ${
+                                state.finderSort ===
+                                'score-desc'
+                                    ? 'selected'
+                                    : ''
+                            }
+                        >
+                            Score: najlepsze
+                        </option>
+
+                        <option
+                            value="sales-desc"
+                            ${
+                                state.finderSort ===
+                                'sales-desc'
+                                    ? 'selected'
+                                    : ''
+                            }
+                        >
+                            Sales: najwyższe
+                        </option>
+
+                        <option
+                            value="latest"
+                            ${
+                                state.finderSort ===
+                                'latest'
+                                    ? 'selected'
+                                    : ''
+                            }
+                        >
+                            Najnowsze
+                        </option>
+
+                        <option
+                            value="oldest"
+                            ${
+                                state.finderSort ===
+                                'oldest'
+                                    ? 'selected'
+                                    : ''
+                            }
+                        >
+                            Najstarsze
+                        </option>
+
+                        <option
+                            value="score-asc"
+                            ${
+                                state.finderSort ===
+                                'score-asc'
+                                    ? 'selected'
+                                    : ''
+                            }
+                        >
+                            Score: najgorsze
+                        </option>
+                    </select>
+                </div>
+            </div>
+
+            <div
+                class="finder-field"
+                style="margin-top:8px"
+            >
+                <label>
+                    Szukaj po nazwie, marce, ID, kategorii lub powodzie
+                </label>
+
+                <input
+                    id="finder-search"
+                    class="finder-search"
+                    type="text"
+                    value="${esc(state.finderSearch)}"
+                    placeholder="np. dmuchawa, Apple, 18801677904..."
+                >
+            </div>
+
+            <div
+                id="finder-stats"
+                class="finder-stats"
+            ></div>
+
+            <div class="finder-actions">
+                <button
+                    id="finder-refresh"
+                    class="btn primary"
+                >
+                    Odśwież
+                </button>
+
+                <button
+                    id="finder-export-csv"
+                    class="btn"
+                >
+                    Eksport CSV
+                </button>
+
+                <button
+                    id="finder-export-json"
+                    class="btn"
+                >
+                    Eksport JSON
+                </button>
+
+                <button
+                    id="finder-clear"
+                    class="btn"
+                >
+                    Wyczyść bazę
+                </button>
+            </div>
+        </div>
+
+        <div id="finder-result">
+            <div class="placeholder">
+                Baza jeszcze nie została wczytana.
+            </div>
+        </div>
+    </div>
+</section>
+
+</div>
+`;
+
+        document.body.appendChild(
+            panel
+        );
+
+        bind();
+
+        activate(
+            state.activeTab
+        );
+    }
+
+    function activateFinderView(
+        view
+    ) {
+        const selected =
+            [
+                'finder',
+                'database'
+            ].includes(
+                view
+            )
+                ? view
+                : 'finder';
+
+        state.finderView =
+            selected;
+
+        save();
+
+        document.querySelectorAll(
+            '.finder-subtab'
+        ).forEach(
+            button => {
+                button.classList.toggle(
+                    'active',
+                    button.dataset.finderView ===
+                    selected
+                );
+            }
+        );
+
+        document.querySelectorAll(
+            '.finder-view'
+        ).forEach(
+            section => {
+                section.classList.toggle(
+                    'active',
+                    section.id ===
+                    `finder-view-${selected}`
+                );
+            }
+        );
+
+        if (
+            selected ===
+            'database'
+        )
+            renderFinderDatabase();
+        else
+            renderFinderAutomation();
+    }
+
+    function activate(name) {
+        const selected =
+            [
+                'category',
+                'product',
+                'filter',
+                'advanced',
+                'finder'
+            ].includes(
+                name
+            )
+                ? name
+                : 'category';
+
+        state.activeTab =
+            selected;
+
+        save();
+
+        document.querySelectorAll(
+            '.tab'
+        ).forEach(
+            button =>
+                button.classList.toggle(
+                    'active',
+                    button.dataset.tab ===
+                    selected
+                )
+        );
+
+        document.querySelectorAll(
+            '.pane'
+        ).forEach(
+            pane =>
+                pane.classList.toggle(
+                    'active',
+                    pane.id ===
+                    `pane-${selected}`
+                )
+        );
+
+        const panel =
+            document.getElementById(
+                'natan-panel-v63'
+            );
+
+        panel?.classList.toggle(
+            'finder-active',
+            selected ===
+                'finder' &&
+            !state.collapsed
+        );
+
+        if (
+            selected ===
+            'finder'
+        )
+            activateFinderView(
+                state.finderView
+            );
+    }
+
+    function bind() {
+        const panel =
+            document.getElementById(
+                'natan-panel-v63'
+            );
+
+        document.getElementById(
+            'natan-collapse'
+        ).onclick =
+            event => {
+                state.collapsed =
+                    !state.collapsed;
+
+                panel.classList.toggle(
+                    'collapsed',
+                    state.collapsed
+                );
+
+                panel.classList.toggle(
+                    'finder-active',
+                    state.activeTab ===
+                        'finder' &&
+                    !state.collapsed
+                );
+
+                event.currentTarget.textContent =
+                    state.collapsed
+                        ? '+'
+                        : '—';
+
+                save();
+            };
+
+        document.querySelectorAll(
+            '.tab'
+        ).forEach(
+            button => {
+                button.onclick =
+                    () =>
+                        activate(
+                            button.dataset.tab
+                        );
+            }
+        );
+
+        document.querySelectorAll(
+            '.finder-subtab'
+        ).forEach(
+            button => {
+                button.onclick =
+                    () =>
+                        activateFinderView(
+                            button.dataset.finderView
+                        );
+            }
+        );
+
+        const bindNumber = (
+            id,
+            property,
+            minimum,
+            maximum,
+            round = true
+        ) => {
+            document.getElementById(
+                id
+            ).addEventListener(
+                'input',
+                event => {
+                    if (
+                        event.target.value ===
+                        ''
+                    )
+                        return;
+
+                    let value =
+                        Number(
+                            event.target.value
+                        );
+
+                    if (round)
+                        value =
+                            Math.round(
+                                value
+                            );
+
+                    state[property] =
+                        clamp(
+                            value,
+                            minimum,
+                            maximum
+                        );
+
+                    event.target.value =
+                        state[property];
+
+                    save();
+
+                    if (
+                        lastProduct &&
+                        [
+                            'profitPercent',
+                            'profitCustom',
+                            'finderMaxPrice',
+                            'finderMinSales'
+                        ].includes(
+                            property
+                        )
+                    ) {
+                        lastProduct.pricing =
+                            pricing(
+                                lastProduct.price
+                            );
+
+                        lastProduct.score =
+                            productScore(
+                                lastProduct
+                            );
+
+                        lastProduct.verdict =
+                            productVerdict(
+                                lastProduct
+                            );
+
+                        renderProduct();
+                    }
+
+                    if (
+                        property ===
+                            'finderMaxPages' ||
+                        property ===
+                            'finderMinSales' ||
+                        property ===
+                            'finderMaxPrice'
+                    ) {
+                        renderFinderAutomation();
+                    }
+                }
+            );
+        };
+
+        bindNumber(
+            'category-min',
+            'categoryMinSales',
+            1,
+            9999
+        );
+
+        bindNumber(
+            'category-max',
+            'maxCategoryOffers',
+            100,
+            999999
+        );
+
+        bindNumber(
+            'category-strong',
+            'minStrongOffers',
+            1,
+            100
+        );
+
+        bindNumber(
+            'profit-custom',
+            'profitCustom',
+            0,
+            10000
+        );
+
+        bindNumber(
+            'finder-min-sales',
+            'finderMinSales',
+            1,
+            9999
+        );
+
+        bindNumber(
+            'finder-max-pages',
+            'finderMaxPages',
+            1,
+            100
+        );
+
+        bindNumber(
+            'finder-max-price',
+            'finderMaxPrice',
+            1,
+            100000
+        );
+
+        const profitMode =
+            document.getElementById(
+                'profit-mode'
+            );
+
+        const syncProfitMode =
+            () => {
+                document.querySelector(
+                    '.profit-percent'
+                ).classList.toggle(
+                    'hidden',
+                    state.profitMode !==
+                    'percent'
+                );
+
+                document.querySelector(
+                    '.profit-custom'
+                ).classList.toggle(
+                    'hidden',
+                    state.profitMode !==
+                    'custom'
+                );
+            };
+
+        profitMode.onchange =
+            event => {
+                state.profitMode =
+                    event.target.value ===
+                    'custom'
+                        ? 'custom'
+                        : 'percent';
+
+                save();
+
+                syncProfitMode();
+
+                if (lastProduct) {
+                    lastProduct.pricing =
+                        pricing(
+                            lastProduct.price
+                        );
+
+                    renderProduct();
+                }
+            };
+
+        syncProfitMode();
+
+        const filterRange =
+            document.getElementById(
+                'filter-range'
+            );
+
+        const filterNumber =
+            document.getElementById(
+                'filter-num'
+            );
+
+        const setFilter =
+            value => {
+                state.filterMinSales =
+                    clamp(
+                        Math.round(
+                            Number(
+                                value
+                            )
+                        ),
+                        0,
+                        999
+                    );
+
+                filterRange.value =
+                    state.filterMinSales;
+
+                filterNumber.value =
+                    state.filterMinSales;
+
+                save();
+            };
+
+        filterRange.oninput =
+            event =>
+                setFilter(
+                    event.target.value
+                );
+
+        filterNumber.oninput =
+            event => {
+                if (
+                    event.target.value !==
+                    ''
+                )
+                    setFilter(
+                        event.target.value
+                    );
+            };
+
+        document.getElementById(
+            'hide-sponsored'
+        ).onchange =
+            event => {
+                state.hideSponsored =
+                    event.target.checked;
+
+                save();
+            };
+
+        document.getElementById(
+            'hide-unknown'
+        ).onchange =
+            event => {
+                state.hideUnknown =
+                    event.target.checked;
+
+                save();
+            };
+
+        document.getElementById(
+            'finder-mode'
+        ).onchange =
+            event => {
+                state.finderMode =
+                    event.target.value ===
+                    'current'
+                        ? 'current'
+                        : 'auto';
+
+                save();
+
+                renderFinderAutomation();
+            };
+
+        document.getElementById(
+            'finder-blocked-brands'
+        ).addEventListener(
+            'input',
+            event => {
+                state.finderBlockedBrands =
+                    event.target.value;
+
+                save();
+
+                if (lastProduct) {
+                    lastProduct.score =
+                        productScore(
+                            lastProduct
+                        );
+
+                    lastProduct.verdict =
+                        productVerdict(
+                            lastProduct
+                        );
+
+                    renderProduct();
+                }
+            }
+        );
+
+        document.getElementById(
+            'finder-excluded-categories'
+        ).addEventListener(
+            'input',
+            event => {
+                state.finderExcludedCategories =
+                    event.target.value;
+
+                save();
+            }
+        );
+
+        document.getElementById(
+            'finder-auto-save'
+        ).onchange =
+            event => {
+                state.finderAutoSave =
+                    event.target.checked;
+
+                save();
+            };
+
+        document.getElementById(
+            'finder-start'
+        ).onclick =
+            startFinderCrawler;
+
+        document.getElementById(
+            'finder-pause'
+        ).onclick =
+            pauseFinderCrawler;
+
+        document.getElementById(
+            'finder-stop'
+        ).onclick =
+            stopFinderCrawler;
+
+        document.getElementById(
+            'finder-status'
+        ).onchange =
+            event => {
+                state.finderStatusFilter =
+                    event.target.value;
+
+                save();
+
+                renderFinderDatabase();
+            };
+
+        document.getElementById(
+            'finder-date'
+        ).onchange =
+            event => {
+                state.finderDateFilter =
+                    event.target.value;
+
+                save();
+
+                renderFinderDatabase();
+            };
+
+        document.getElementById(
+            'finder-sort'
+        ).onchange =
+            event => {
+                state.finderSort =
+                    event.target.value;
+
+                save();
+
+                renderFinderDatabase();
+            };
+
+        document.getElementById(
+            'finder-search'
+        ).oninput =
+            event => {
+                state.finderSearch =
+                    event.target.value;
+
+                save();
+
+                clearTimeout(
+                    event.target
+                        ._finderTimer
+                );
+
+                event.target
+                    ._finderTimer =
+                        setTimeout(
+                            () =>
+                                renderFinderDatabase(),
+                            180
+                        );
+            };
+
+        document.getElementById(
+            'finder-refresh'
+        ).onclick =
+            () =>
+                renderFinderDatabase();
+
+        document.getElementById(
+            'finder-export-csv'
+        ).onclick =
+            exportFinderCsv;
+
+        document.getElementById(
+            'finder-export-json'
+        ).onclick =
+            exportFinderJson;
+
+        document.getElementById(
+            'finder-clear'
+        ).onclick =
+            async () => {
+                if (
+                    !confirm(
+                        'Na pewno wyczyścić całą pamięć Product Finder? Tej operacji nie można cofnąć.'
+                    )
+                )
+                    return;
+
+                try {
+                    await finderClearDatabase();
+
+                    lastFinderRows =
+                        [];
+
+                    await renderFinderDatabase();
+                } catch (error) {
+                    console.error(
+                        '[Natan Allegro] Nie udało się wyczyścić bazy Product Finder.',
+                        error
+                    );
+
+                    alert(
+                        'Nie udało się wyczyścić bazy Product Finder.'
+                    );
+                }
+            };
+
+        document.getElementById(
+            'natan-category-run'
+        ).onclick =
+            runCategory;
+
+        document.getElementById(
+            'natan-product-run'
+        ).onclick =
+            runProduct;
+
+        document.getElementById(
+            'apply-filter'
+        ).onclick =
+            applyFilter;
+
+        document.getElementById(
+            'remove-filter'
+        ).onclick =
+            removeFilter;
+
+        document.getElementById(
+            'reset-settings'
+        ).onclick =
+            reset;
+    }
+
+    function renderCategory() {
+        if (!lastCategory)
+            return;
+
+        const a =
+            lastCategory;
+
+        const v =
+            a.verdict;
+
+        document.getElementById(
+            'category-result'
+        ).innerHTML = `
+<div class="verdict ${v.cls}">
+    <div class="vlabel">
+        ${v.label}
+    </div>
+
+    <div class="score">
+        ${a.score}/100
+    </div>
+
+    <div class="desc">
+        ${esc(v.desc)}
+    </div>
+</div>
+
+<div class="card">
+    <div class="summary">
+        <span>Kategoria:</span>
+        <strong>${esc(a.name)}</strong>
+
+        <span>Liczba ofert:</span>
+        <strong>${fmt(a.count)}</strong>
+
+        <span>Oferty ≥ ${state.categoryMinSales}:</span>
+        <strong>${fmt(a.strong)}</strong>
+
+        <span>Najwyższa sprzedaż:</span>
+        <strong>${fmt(a.max)}</strong>
+    </div>
+</div>
+`;
+    }
+
+    function renderAdvanced() {
+        if (!lastCategory)
+            return;
+
+        const a =
+            lastCategory;
+
+        document.getElementById(
+            'advanced-result'
+        ).innerHTML = `
+<div class="card">
+    <div class="summary">
+        <span>Wykryte oferty:</span>
+        <strong>${fmt(a.detected)}</strong>
+
+        <span>Ze sprzedażą:</span>
+        <strong>${fmt(a.withSales)}</strong>
+
+        <span>Średnia TOP 5:</span>
+        <strong>${fmt(a.top5)}</strong>
+
+        <span>Organiczne:</span>
+        <strong>${fmt(a.organic)}</strong>
+
+        <span>Sponsorowane:</span>
+        <strong>${fmt(a.promoted)}</strong>
+
+        <span>Mocne organiczne:</span>
+        <strong>${fmt(a.strongOrganic)}</strong>
+
+        <span>Mocne sponsorowane:</span>
+        <strong>${fmt(a.strongPromoted)}</strong>
+
+        <span>Bez danych:</span>
+        <strong>${fmt(a.unknown)}</strong>
+
+        <span>Czas:</span>
+        <strong>${fmt(a.ms)} ms</strong>
+    </div>
+</div>
+`;
+    }
+
+    function renderFilter() {
+        if (!lastFilter)
+            return;
+
+        const r =
+            lastFilter;
+
+        document.getElementById(
+            'filter-result'
+        ).innerHTML = `
+Widoczne:
+<strong>${r.visible}</strong>
+<br>
+Ukryte przez sprzedaż:
+<strong>${r.low}</strong>
+<br>
+Ukryte sponsorowane:
+<strong>${r.sponsored}</strong>
+<br>
+Ukryte bez danych:
+<strong>${r.unknown}</strong>
+<br>
+Czas:
+<strong>${r.ms} ms</strong>
+`;
+    }
+
+    async function renderFinderDatabase() {
+        const resultElement =
+            document.getElementById(
+                'finder-result'
+            );
+
+        const statsElement =
+            document.getElementById(
+                'finder-stats'
+            );
+
+        if (
+            !resultElement ||
+            !statsElement
+        )
+            return;
+
+        resultElement.innerHTML =
+            '<div class="placeholder">Wczytywanie bazy Product Finder...</div>';
+
+        let allRows;
+
+        try {
+            allRows =
+                await finderGetAllProducts();
+        } catch (error) {
+            console.error(
+                '[Natan Allegro] Nie udało się odczytać bazy Product Finder.',
+                error
+            );
+
+            resultElement.innerHTML =
+                '<div class="placeholder danger">Nie udało się otworzyć bazy Product Finder.</div>';
+
+            return;
+        }
+
+        const counts = {
+            total:
+                allRows.length,
+
+            accepted:
+                allRows.filter(
+                    row =>
+                        row.status ===
+                        'ACCEPTED'
+                ).length,
+
+            maybe:
+                allRows.filter(
+                    row =>
+                        row.status ===
+                        'MAYBE'
+                ).length,
+
+            rejected:
+                allRows.filter(
+                    row =>
+                        row.status ===
+                        'REJECTED'
+                ).length,
+
+            skipped:
+                allRows.filter(
+                    row =>
+                        row.status ===
+                        'SKIPPED'
+                ).length
+        };
+
+        lastFinderRows =
+            filteredFinderRows(
+                allRows
+            );
+
+        statsElement.innerHTML = `
+<div class="finder-stat">
+    <span>Wszystkie</span>
+    <strong>${fmt(counts.total)}</strong>
+</div>
+
+<div class="finder-stat">
+    <span>❤️ Accepted</span>
+    <strong>${fmt(counts.accepted)}</strong>
+</div>
+
+<div class="finder-stat">
+    <span>🟡 Maybe</span>
+    <strong>${fmt(counts.maybe)}</strong>
+</div>
+
+<div class="finder-stat">
+    <span>❌ Rejected</span>
+    <strong>${fmt(counts.rejected)}</strong>
+</div>
+
+<div class="finder-stat">
+    <span>⏭ Skipped</span>
+    <strong>${fmt(counts.skipped)}</strong>
+</div>
+
+<div class="finder-stat">
+    <span>Widoczne</span>
+    <strong>${fmt(lastFinderRows.length)}</strong>
+</div>
+`;
+
+        if (
+            !lastFinderRows.length
+        ) {
+            resultElement.innerHTML =
+                '<div class="placeholder">Brak produktów pasujących do aktualnych filtrów.</div>';
+
+            return;
+        }
+
+        const rows =
+            lastFinderRows
+                .slice(
+                    0,
+                    300
+                )
+                .map(
+                    row => {
+                        const statusClass =
+                            String(
+                                row.status ||
+                                'SKIPPED'
+                            ).toLowerCase();
+
+                        const link =
+                            row.url
+                                ? `<a class="finder-link" href="${esc(
+                                    row.url
+                                )}" target="_blank" rel="noopener noreferrer">OTWÓRZ</a>`
+                                : '—';
+
+                        return `
+<tr>
+    <td>
+        <span class="finder-badge ${statusClass}">
+            ${esc(
+                finderStatusLabel(
+                    row.status
+                )
+            )}
+        </span>
+    </td>
+
+    <td class="finder-num">
+        ${fmt(row.score)}
+    </td>
+
+    <td class="finder-num">
+        ${fmt(row.sales)}
+    </td>
+
+    <td class="finder-num">
+        ${
+            row.price ===
+                null ||
+            row.price ===
+                undefined
+                ? '—'
+                : `${fmt(
+                    row.price,
+                    2
+                )} zł`
+        }
+    </td>
+
+    <td class="finder-product">
+        <strong>
+            ${esc(
+                row.title ||
+                'Nie wykryto'
+            )}
+        </strong>
+
+        <small>
+            ${esc(
+                row.brand ||
+                'Nie wykryto'
+            )}
+            ·
+            ${esc(
+                row.category ||
+                'Nie wykryto'
+            )}
+        </small>
+
+        <small>
+            ${esc(
+                row.decisionReason ||
+                ''
+            )}
+        </small>
+    </td>
+
+    <td class="finder-num">
+        ${
+            row.rating ===
+                null ||
+            row.rating ===
+                undefined
+                ? '—'
+                : fmt(
+                    row.rating,
+                    2
+                )
+        }
+    </td>
+
+    <td class="finder-num">
+        ${fmt(
+            row.catalogueOffers
+        )}
+    </td>
+
+    <td class="finder-date">
+        ${esc(
+            formatCheckedAt(
+                row.lastCheckedAt
+            )
+        )}
+
+        <small>
+            ${fmt(
+                row.checkCount
+            )}× sprawdzony
+        </small>
+    </td>
+
+    <td>
+        ${link}
+    </td>
+</tr>
+`;
+                    }
+                )
+                .join('');
+
+        const limitNote =
+            lastFinderRows.length >
+            300
+                ? `<div class="note">Wyświetlam pierwsze 300 z ${fmt(
+                    lastFinderRows.length
+                )} wyników. Eksport obejmuje wszystkie widoczne po filtrach.</div>`
+                : '';
+
+        resultElement.innerHTML = `
+${limitNote}
+
+<div class="finder-table-wrap">
+    <table class="finder-table">
+        <thead>
+            <tr>
+                <th>Status</th>
+                <th>Score</th>
+                <th>Sales</th>
+                <th>Cena</th>
+                <th>Produkt</th>
+                <th>Rating</th>
+                <th>Oferty</th>
+                <th>Checked At</th>
+                <th>Link</th>
+            </tr>
+        </thead>
+
+        <tbody>
+            ${rows}
+        </tbody>
+    </table>
+</div>
+`;
+    }
+
+    function renderProduct() {
+        if (!lastProduct)
+            return;
+
+        const a =
+            lastProduct;
+
+        const v =
+            a.verdict;
+
+        const price =
+            a.pricing;
+
+        const targetLabel =
+            price
+                ? (
+                    price.profitMode ===
+                    'percent'
+                        ? `${fmt(
+                            price.targetNet,
+                            2
+                        )} zł (SMART: ${fmt(
+                            price.profitPercent,
+                            1
+                        )}%${
+                            price.minimumProfitApplied
+                                ? ', minimum 30 zł'
+                                : ''
+                        })`
+                        : `${fmt(
+                            price.targetNet,
+                            2
+                        )} zł (Custom)`
+                )
+                : '';
+
+        const priceBlock =
+            price
+                ? `
+<span>Cena zakupu:</span>
+<strong>${fmt(price.purchase, 2)} zł</strong>
+
+<span>Prowizja:</span>
+<strong>12%</strong>
+
+<span>Dostawa:</span>
+<strong>0,00 zł</strong>
+
+<span>Docelowy zysk:</span>
+<strong>${targetLabel}</strong>
+
+<span>Cena minimalna:</span>
+<strong>${fmt(price.minimum, 2)} zł</strong>
+
+<span>Cena sugerowana:</span>
+<strong class="price">${fmt(price.suggested, 2)} zł</strong>
+
+<span>Zysk netto:</span>
+<strong>${fmt(price.netProfit, 2)} zł</strong>
+`
+                : `
+<span class="danger">
+    Nie wykryto ceny produktu.
+</span>
+`;
+
+        const gtinStatus =
+            a.gtin
+                ? (
+                    a.gtinCopied ===
+                    true
+                        ? 'Skopiowano ✓'
+                        : (
+                            a.gtinCopied ===
+                            false
+                                ? 'Kliknij numer'
+                                : 'Kopiowanie...'
+                        )
+                )
+                : 'Nie wykryto';
+
+        const gtinBar = `
+<div
+    id="natan-ean-bar"
+    class="ean-bar ${a.gtin ? '' : 'missing'}"
+>
+    <span class="ean-label">
+        EAN / GTIN
+    </span>
+
+    <strong
+        id="natan-ean-value"
+        class="ean-value"
+    >
+        ${a.gtin ? esc(a.gtin) : '—'}
+    </strong>
+
+    <span
+        id="natan-ean-status"
+        class="ean-status"
+    >
+        ${gtinStatus}
+    </span>
+</div>
+`;
+
+        const finderInfo =
+            a.finderSaved
+                ? `
+<div class="card">
+    <div class="summary">
+        <span>Product Finder:</span>
+        <strong>✅ ZAPISANO</strong>
+
+        <span>Status:</span>
+        <strong>
+            ${esc(
+                finderStatusLabel(
+                    a.finderRecord?.status
+                )
+            )}
+        </strong>
+
+        <span>Checked At:</span>
+        <strong>
+            ${esc(
+                formatCheckedAt(
+                    a.finderRecord
+                        ?.lastCheckedAt
+                )
+            )}
+        </strong>
+
+        <span>Powód:</span>
+        <strong>
+            ${esc(
+                a.finderRecord
+                    ?.decisionReason ||
+                '—'
+            )}
+        </strong>
+    </div>
+</div>
+`
+                : (
+                    a.finderSaved ===
+                    false
+                        ? `
+<div class="card">
+    <div class="danger">
+        Nie udało się zapisać wyniku do Product Finder.
+    </div>
+</div>
+`
+                        : ''
+                );
+
+        document.getElementById(
+            'product-result'
+        ).innerHTML = `
+<div class="verdict ${v.cls}">
+    <div class="vlabel">
+        ${v.label}
+    </div>
+
+    <div class="score">
+        ${a.score}/100
+    </div>
+
+    <div class="desc">
+        ${esc(v.desc)}
+    </div>
+</div>
+
+${gtinBar}
+
+<div class="card">
+    <div class="summary">
+
+        <span>Produkt:</span>
+        <strong>${esc(a.title)}</strong>
+
+        <span>Product ID:</span>
+        <strong>${esc(a.productId || '—')}</strong>
+
+        <span>Offer ID:</span>
+        <strong>${esc(a.offerId || '—')}</strong>
+
+        <span>Sprzedaż produktu:</span>
+        <strong>${fmt(a.sales)}</strong>
+
+        <span>Ocena:</span>
+        <strong>
+            ${
+                a.rating ===
+                null
+                    ? '—'
+                    : fmt(
+                        a.rating,
+                        2
+                    )
+            }
+        </strong>
+
+        <span>Oceny:</span>
+        <strong>${fmt(a.ratings)}</strong>
+
+        <span>Recenzje:</span>
+        <strong>${fmt(a.reviews)}</strong>
+
+        <span>Ofert w katalogu:</span>
+        <strong>${fmt(a.offers)}</strong>
+
+        <span>Marka:</span>
+        <strong>${esc(a.brand)}</strong>
+
+        <span>Kategoria:</span>
+        <strong>
+            ${esc(
+                a.category?.name ||
+                'Nie wykryto'
+            )}
+        </strong>
+
+        <span>Oficjalny sklep:</span>
+        <strong>${a.official ? 'TAK' : 'NIE'}</strong>
+
+        <span>Marka = sklep:</span>
+        <strong>
+            ${
+                a.brandMatchesShop
+                    ? 'TAK'
+                    : 'NIE'
+            }
+        </strong>
+    </div>
+</div>
+
+<div class="card">
+    <div class="summary">
+        ${priceBlock}
+    </div>
+</div>
+
+${finderInfo}
+`;
+
+        const gtinValue =
+            document.getElementById(
+                'natan-ean-value'
+            );
+
+        if (
+            a.gtin &&
+            gtinValue
+        ) {
+            gtinValue.style.cursor =
+                'pointer';
+
+            gtinValue.title =
+                'Kliknij, aby skopiować EAN / GTIN';
+
+            gtinValue.onclick =
+                async () => {
+                    const copied =
+                        await copyTextToClipboard(
+                            a.gtin
+                        );
+
+                    a.gtinCopied =
+                        copied;
+
+                    const status =
+                        document.getElementById(
+                            'natan-ean-status'
+                        );
+
+                    if (status) {
+                        status.textContent =
+                            copied
+                                ? 'Skopiowano ✓'
+                                : 'Błąd kopiowania';
+                    }
+                };
+        }
+    }
+
+    function start() {
+        addStyles();
+
+        createPanel();
+
+        renderFinderAutomation();
+
+        const crawler =
+            loadFinderCrawlerState();
+
+        if (
+            crawler.status ===
+            'running'
+        ) {
+            setTimeout(
+                () =>
+                    resumeFinderCrawler(),
+                700
+            );
+        }
+
+        console.log(
+            '[Natan Allegro v6.5.0] Uruchomiono. SMART + GTIN/EAN + Product Finder AUTO + baza danych.'
+        );
+    }
+
+    start();
+
+})();
